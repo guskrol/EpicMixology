@@ -1,0 +1,17 @@
+package org.gusta.mixology.core;
+
+public enum MixologyState {
+    CHECK_REQUIREMENTS,
+    PLAN_PROFIT,
+    BUY_SUPPLIES,
+    PREPARE_LOADOUT,
+    TRAVEL_TO_MIXOLOGY,
+    PREPARE_SUPPLIES,
+    LOAD_HOPPER,
+    READ_ORDERS,
+    RETURN_TO_LEVERS,
+    MIX_BASES,
+    PROCESS_POTIONS,
+    DEPOSIT_ORDERS,
+    RECOVER
+}
