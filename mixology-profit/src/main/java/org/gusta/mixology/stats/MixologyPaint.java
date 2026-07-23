@@ -7,7 +7,11 @@ import java.awt.Color;
 import java.awt.Rectangle;
 
 public class MixologyPaint {
-    private static final String VERSION = "v0.1.88-capped-hopper-bank-confirm";
+    private final String version;
+
+    public MixologyPaint(String version) {
+        this.version = version == null || version.isBlank() ? "unknown" : version;
+    }
 
     public void paint(PaintContext paint, APIContext ctx, MixologyStats stats) {
         if (paint == null || ctx == null || stats == null) {
@@ -23,7 +27,7 @@ public class MixologyPaint {
         paint.draw(new Rectangle(x, y, width, height), new Color(230, 235, 245, 210), 1);
 
         int line = y + 20;
-        paint.drawText("Mixology Profit " + VERSION, x + 12, line, Color.WHITE, 14);
+        paint.drawText("Mixology Profit " + version, x + 12, line, Color.WHITE, 14);
         line += 18;
         paint.drawText("Runtime: " + stats.runtimeText(), x + 12, line, new Color(220, 235, 255), 12);
         line += 16;

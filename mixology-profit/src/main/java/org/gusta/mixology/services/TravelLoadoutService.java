@@ -314,28 +314,10 @@ public class TravelLoadoutService {
             return;
         }
 
-        List<Integer> bestIndexes = new ArrayList<>();
-        int bestScore = -1;
-        for (int i = 0; i < RANDOM_GEAR_PRESETS.length; i++) {
-            int score = gearAvailabilityScore(ctx, RANDOM_GEAR_PRESETS[i]);
-            if (score > bestScore) {
-                bestScore = score;
-                bestIndexes.clear();
-                bestIndexes.add(i);
-            } else if (score == bestScore) {
-                bestIndexes.add(i);
-            }
-        }
-
-        int index;
-        if (bestScore > 0 && !bestIndexes.isEmpty()) {
-            index = bestIndexes.get(ThreadLocalRandom.current().nextInt(bestIndexes.size()));
-            stats.debug("Selected travel gear preset from bank/equipment availability: index="
-                    + index + " score=" + bestScore);
-        } else {
-            index = ThreadLocalRandom.current().nextInt(RANDOM_GEAR_PRESETS.length);
-            stats.debug("Selected random travel gear preset index=" + index);
-        }
+        int index = ThreadLocalRandom.current().nextInt(RANDOM_GEAR_PRESETS.length);
+        int availabilityScore = gearAvailabilityScore(ctx, RANDOM_GEAR_PRESETS[index]);
+        stats.debug("Randomized travel gear preset: index=" + index
+                + " availablePieces=" + availabilityScore + "/" + RANDOM_GEAR_PRESETS[index].length);
         selectedGear = RANDOM_GEAR_PRESETS[index];
     }
 

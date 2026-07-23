@@ -9,10 +9,16 @@ import java.util.function.Consumer;
 
 public class SimpleAntibanController implements RuntimeController {
     private final Consumer<String> logger;
+    private final boolean safeInputMode;
     private long nextActionAt;
 
     public SimpleAntibanController(Consumer<String> logger) {
+        this(logger, false);
+    }
+
+    public SimpleAntibanController(Consumer<String> logger, boolean safeInputMode) {
         this.logger = logger;
+        this.safeInputMode = safeInputMode;
         scheduleNextAction(70, 180);
     }
 
@@ -33,6 +39,15 @@ public class SimpleAntibanController implements RuntimeController {
 
     @Override
     public void execute(APIContext ctx) {
+        if (safeInputMode) {
+            logger.accept("[Antiban] Safe multi-client mode: camera nudge only");
+            ctx.camera().setYawDeg(randomInt(0, 360));
+            ctx.camera().setPitch(randomInt(260, 380));
+            Time.sleep(450, 1000);
+            scheduleNextAction(80, 220);
+            return;
+        }
+
         int roll = ThreadLocalRandom.current().nextInt(100);
         if (roll < 45) {
             logger.accept("[Antiban] Camera nudge");

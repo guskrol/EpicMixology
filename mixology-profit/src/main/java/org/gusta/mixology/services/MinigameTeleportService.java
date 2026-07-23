@@ -8,6 +8,7 @@ import com.epicbot.api.shared.util.time.Time;
 import org.gusta.mixology.config.MixologySettings;
 import org.gusta.mixology.stats.MixologyStats;
 
+import java.awt.Rectangle;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.ConcurrentModificationException;
@@ -25,12 +26,13 @@ public class MinigameTeleportService {
     private static final int MIXOLOGY_CARD_GROUP = 951;
     private static final int MIXOLOGY_CARD_LIST_CHILD = 4;
     private static final int MIXOLOGY_CARD_CHILD = 14;
+    private static final int MIXOLOGY_CARD_SCROLL_LIMIT = 7;
 
     private final MixologySettings settings;
     private final MixologyStats stats;
     private long nextAttemptAt;
     private boolean magicTabSelected;
-    private boolean mixologyCardScrollPrepared;
+    private int mixologyCardScrollAttempts;
     private boolean mixologyCardSelected;
 
     public MinigameTeleportService(MixologySettings settings, MixologyStats stats) {
@@ -58,7 +60,7 @@ public class MinigameTeleportService {
         if (mixologyCardSelected) {
             return clickTeleport(ctx);
         }
-        if (isMixologyCardVisible(ctx)) {
+        if (isMinigameTeleportPanelOpen(ctx)) {
             if (!selectMasteringMixology(ctx)) {
                 return true;
             }
@@ -115,11 +117,11 @@ public class MinigameTeleportService {
             return true;
         }
 
-        Time.sleep(700, 1200, () -> isMixologyCardVisible(ctx) || teleportLooksOnCooldown(ctx), 100);
-        if (isMixologyCardVisible(ctx)) {
+        Time.sleep(700, 1200, () -> isMinigameTeleportPanelOpen(ctx) || teleportLooksOnCooldown(ctx), 100);
+        if (isMinigameTeleportPanelOpen(ctx)) {
             stats.setStatus("Mastering Mixology teleport panel opened");
             magicTabSelected = false;
-            mixologyCardScrollPrepared = false;
+            mixologyCardScrollAttempts = 0;
             mixologyCardSelected = false;
             return true;
         }
@@ -155,30 +157,25 @@ public class MinigameTeleportService {
     private boolean selectMasteringMixology(APIContext ctx) {
         WidgetChild mixologyCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
         if (mixologyCard != null && mixologyCard.isValid()) {
-            if (!mixologyCardScrollPrepared) {
-                mixologyCardScrollPrepared = true;
-                WidgetChild list = mixologyCard.getParent();
-                if (list == null || !list.isValid()) {
-                    list = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_LIST_CHILD);
-                }
-                if (list != null && list.isValid() && ctx.widgets().scroll(list, mixologyCard)) {
-                    stats.setStatus("Scrolling minigame list to Mastering Mixology (widget 951.14)");
-                    Time.sleep(450, 750);
-                    return false;
-                }
+            if (scrollMixologyCardIntoView(ctx, mixologyCard)) {
+                return false;
             }
 
             stats.setStatus("Selecting Mastering Mixology (widget 951.14)");
             if (clickWidget(ctx, mixologyCard, "Select")) {
+                mixologyCardScrollAttempts = 0;
                 Time.sleep(500, 900);
                 return true;
             }
+            stats.debug("Mastering Mixology widget 951.14 rejected click after scroll attempts="
+                    + mixologyCardScrollAttempts + " bounds=" + safeBounds(mixologyCard));
         }
 
         if (hasText(ctx, "mastering mixology")) {
             WidgetChild selected = findClickableText(ctx, "mastering mixology");
             if (selected == null || click(ctx, selected)) {
                 stats.setStatus("Selected Mastering Mixology teleport");
+                mixologyCardScrollAttempts = 0;
                 Time.sleep(500, 900);
                 return true;
             }
@@ -198,7 +195,20 @@ public class MinigameTeleportService {
             return false;
         }
 
+        if (isMinigameTeleportPanelOpen(ctx) && mixologyCardScrollAttempts < MIXOLOGY_CARD_SCROLL_LIMIT) {
+            mixologyCardScrollAttempts++;
+            stats.setStatus("Scrolling minigame list searching Mastering Mixology "
+                    + mixologyCardScrollAttempts + "/" + MIXOLOGY_CARD_SCROLL_LIMIT);
+            WidgetChild list = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_LIST_CHILD);
+            if (list != null && list.isValid()) {
+                ctx.widgets().scroll(list, list);
+            }
+            Time.sleep(450, 750);
+            return false;
+        }
+
         stats.setStatus("Mastering Mixology option not visible in minigame teleport UI");
+        mixologyCardScrollAttempts = 0;
         nextAttemptAt = System.currentTimeMillis() + QUICK_RETRY_MILLIS;
         return false;
     }
@@ -206,6 +216,62 @@ public class MinigameTeleportService {
     private boolean isMixologyCardVisible(APIContext ctx) {
         WidgetChild mixologyCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
         return mixologyCard != null && mixologyCard.isValid();
+    }
+
+    private boolean isMinigameTeleportPanelOpen(APIContext ctx) {
+        WidgetChild list = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_LIST_CHILD);
+        return isMixologyCardVisible(ctx) || (list != null && list.isValid()) || hasText(ctx, "mastering mixology");
+    }
+
+    private boolean scrollMixologyCardIntoView(APIContext ctx, WidgetChild mixologyCard) {
+        if (isWidgetInClickableArea(mixologyCard) && mixologyCardScrollAttempts > 0) {
+            return false;
+        }
+        if (mixologyCardScrollAttempts >= MIXOLOGY_CARD_SCROLL_LIMIT) {
+            return false;
+        }
+
+        WidgetChild list = mixologyCard.getParent();
+        if (list == null || !list.isValid()) {
+            list = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_LIST_CHILD);
+        }
+        if (list == null || !list.isValid()) {
+            stats.debug("Minigame list widget 951.4 unavailable while scrolling to Mixology card");
+            return false;
+        }
+
+        mixologyCardScrollAttempts++;
+        stats.setStatus("Scrolling minigame list to Mastering Mixology "
+                + mixologyCardScrollAttempts + "/" + MIXOLOGY_CARD_SCROLL_LIMIT);
+        boolean scrolled = ctx.widgets().scroll(list, mixologyCard);
+        stats.debug("Mixology teleport scroll attempt=" + mixologyCardScrollAttempts
+                + " scrolled=" + scrolled
+                + " cardBounds=" + safeBounds(mixologyCard)
+                + " listBounds=" + safeBounds(list));
+        if (scrolled || !isWidgetInClickableArea(mixologyCard)) {
+            Time.sleep(450, 750);
+            return true;
+        }
+        return false;
+    }
+
+    private boolean isWidgetInClickableArea(WidgetChild widget) {
+        Rectangle bounds = safeBounds(widget);
+        return bounds != null
+                && bounds.width > 0
+                && bounds.height > 0
+                && bounds.x >= 0
+                && bounds.y >= 0
+                && bounds.x < 1900
+                && bounds.y < 1050;
+    }
+
+    private Rectangle safeBounds(WidgetChild widget) {
+        try {
+            return widget == null ? null : widget.getBounds();
+        } catch (RuntimeException ignored) {
+            return null;
+        }
     }
 
     private boolean isMinigameTeleportSpellVisible(APIContext ctx) {
@@ -233,7 +299,7 @@ public class MinigameTeleportService {
 
         stats.setStatus("Teleport button unavailable; minigame teleport may be on cooldown");
         mixologyCardSelected = false;
-        mixologyCardScrollPrepared = false;
+        mixologyCardScrollAttempts = 0;
         nextAttemptAt = System.currentTimeMillis() + QUICK_RETRY_MILLIS;
         return false;
     }
@@ -248,7 +314,7 @@ public class MinigameTeleportService {
             nextAttemptAt = System.currentTimeMillis() + COOLDOWN_RETRY_MILLIS;
         }
         mixologyCardSelected = false;
-        mixologyCardScrollPrepared = false;
+        mixologyCardScrollAttempts = 0;
     }
 
     private boolean teleportLooksOnCooldown(APIContext ctx) {

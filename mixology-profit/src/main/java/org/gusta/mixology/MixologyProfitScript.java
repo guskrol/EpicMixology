@@ -40,7 +40,7 @@ import java.util.List;
 
 @ScriptManifest(name = "Mixology Profit", gameType = GameType.OS)
 public class MixologyProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.91-mixology-repository";
+    private static final String SCRIPT_VERSION = "v0.1.96-minigame-scroll";
 
     private MixologyStats stats;
     private MixologyPaint paint;
@@ -48,7 +48,7 @@ public class MixologyProfitScript extends Script {
     @Override
     public boolean onStart(String... args) {
         stats = new MixologyStats(message -> getLogger().info(message));
-        paint = new MixologyPaint();
+        paint = new MixologyPaint(SCRIPT_VERSION);
 
         MixologySettings settings = new MixologySettings();
         ObjectService objects = new ObjectService(stats);
@@ -93,7 +93,7 @@ public class MixologyProfitScript extends Script {
                 new LoopWatchdogController(message -> getLogger().info(message), stats, SCRIPT_VERSION),
                 new StaminaController(stats),
                 new CameraController(this::logInfo),
-                new SimpleAntibanController(this::logInfo)
+                new SimpleAntibanController(this::logInfo, true)
         );
 
         addTask(new ModuleTask(

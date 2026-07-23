@@ -59,16 +59,27 @@ public class ConveyorService {
             return false;
         }
 
+        long deliveryStartedAt = System.currentTimeMillis();
+        stats.debug("Timing conveyor delivery requested: expected=" + expectedOrders
+                + " matching=" + beforeMatching
+                + " ready=" + beforeReady);
         boolean interacted = retryDeposit(ctx, expectedOrders, requiredBatch);
         if (!interacted) {
             return false;
         }
+
+        stats.debug("Timing conveyor click accepted: elapsed="
+                + (System.currentTimeMillis() - deliveryStartedAt) + "ms");
 
         Time.sleep(1200, 2200,
                 () -> potionInventory.readyPotionCount(ctx) < beforeReady,
                 100);
         int afterReady = potionInventory.readyPotionCount(ctx);
         int delivered = Math.max(0, beforeReady - afterReady);
+        if (delivered > 0) {
+            stats.debug("Timing conveyor inventory updated: delivered=" + delivered
+                    + " elapsed=" + (System.currentTimeMillis() - deliveryStartedAt) + "ms");
+        }
         if (delivered < expectedOrders) {
             stats.setStatus("Conveyor accepted only " + delivered
                     + "/" + expectedOrders
@@ -81,6 +92,7 @@ public class ConveyorService {
 
         stats.debug("Recorded completed conveyor batch: delivered=" + delivered
                 + " expected=" + expectedOrders
+                + " elapsed=" + (System.currentTimeMillis() - deliveryStartedAt) + "ms"
                 + " remainingReady=" + afterReady);
         stats.recordOrdersCompleted(1);
         return true;

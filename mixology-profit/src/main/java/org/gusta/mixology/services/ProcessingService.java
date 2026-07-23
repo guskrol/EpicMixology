@@ -11,7 +11,8 @@ import org.gusta.mixology.stats.MixologyStats;
 
 public class ProcessingService {
     private static final long ACTION_RETRY_TIMEOUT_MS = 10_000L;
-    private static final long PROCESS_FINISH_TIMEOUT_MS = 14_000L;
+    private static final long PROCESS_FINISH_FAST_TIMEOUT_MS = 14_000L;
+    private static final long PROCESS_FINISH_EXTENDED_TIMEOUT_MS = 25_000L;
     private static final int RETORT_ID = 55389;
     private static final int ALEMBIC_ID = 55391;
     private static final int AGITATOR_ID = 55390;
@@ -49,11 +50,17 @@ public class ProcessingService {
 
         stats.setStatus(process.statusName() + ": " + order.recipe().displayName());
         int beforeReady = potionInventory.potionCount(ctx, order.recipe());
-        long actionStartedAt = System.currentTimeMillis();
+        long clickRequestedAt = System.currentTimeMillis();
         boolean interacted = retryWorkstation(ctx, process);
         if (!interacted) {
             return false;
         }
+
+        long actionStartedAt = System.currentTimeMillis();
+        stats.debug("Timing finalizer click accepted: recipe=" + order.recipe().displayName()
+                + " process=" + process.name()
+                + " clickRetry=" + (actionStartedAt - clickRequestedAt) + "ms"
+                + " beforeReady=" + beforeReady);
 
         return waitForFinalizerCompletion(ctx, order, actionStartedAt, beforeReady);
     }
@@ -74,18 +81,52 @@ public class ProcessingService {
                         || potionInventory.potionCount(ctx, recipe) > beforeReady,
                 100);
 
-        long deadline = System.currentTimeMillis() + PROCESS_FINISH_TIMEOUT_MS;
-        while (System.currentTimeMillis() < deadline) {
+        long fastDeadline = actionStartedAt + PROCESS_FINISH_FAST_TIMEOUT_MS;
+        long deadline = fastDeadline;
+        boolean observedFinalizerActivity = ctx.localPlayer().isAnimating();
+        boolean extendedWindow = false;
+        boolean chatLatencyLogged = false;
+        boolean inventoryLatencyLogged = false;
+        while (true) {
             int readyNow = potionInventory.potionCount(ctx, recipe);
             boolean matchingChat = stats.hasPotionFinalizerFinishedSince(actionStartedAt, recipe, order.process());
+            long elapsed = System.currentTimeMillis() - actionStartedAt;
+            observedFinalizerActivity |= ctx.localPlayer().isAnimating();
+
+            if (matchingChat && !chatLatencyLogged) {
+                long chatElapsed = Math.max(0L, stats.lastPotionFinalizerFinishedAt() - actionStartedAt);
+                stats.debug("Timing finalizer chat confirmed: recipe=" + recipeName
+                        + " elapsed=" + chatElapsed + "ms");
+                chatLatencyLogged = true;
+            }
+            if (readyNow > beforeReady && !inventoryLatencyLogged) {
+                stats.debug("Timing finalizer inventory confirmed: recipe=" + recipeName
+                        + " count=" + beforeReady + "->" + readyNow
+                        + " elapsed=" + elapsed + "ms");
+                inventoryLatencyLogged = true;
+            }
             if (readyNow > beforeReady && matchingChat) {
                 stats.debug("Finalizer processed item confirmed: "
                         + recipeName
                         + " count " + beforeReady + " -> " + readyNow
+                        + " elapsed=" + elapsed + "ms"
                         + " chat='" + stats.lastPotionFinalizerFinishedMessage() + "'");
                 stats.recordPotionMixed();
                 Time.sleep(350, 650);
                 return true;
+            }
+
+            if (System.currentTimeMillis() >= deadline) {
+                if (!extendedWindow && observedFinalizerActivity) {
+                    extendedWindow = true;
+                    deadline = actionStartedAt + PROCESS_FINISH_EXTENDED_TIMEOUT_MS;
+                    stats.debug("Timing finalizer extension: recipe=" + recipeName
+                            + " waited=" + elapsed + "ms"
+                            + " reason=animation-observed"
+                            + " max=" + PROCESS_FINISH_EXTENDED_TIMEOUT_MS + "ms");
+                    continue;
+                }
+                break;
             }
 
             if (matchingChat) {
@@ -109,7 +150,9 @@ public class ProcessingService {
         stats.setStatus("Finalized potion was not confirmed by id+chat for " + recipeName + "; retrying safely");
         stats.debug("Last finalizer completion message='"
                 + stats.lastPotionFinalizerFinishedMessage()
-                + "' inventory=" + potionInventory.allPotionDetails(ctx));
+                + "' elapsed=" + (System.currentTimeMillis() - actionStartedAt) + "ms"
+                + " extended=" + extendedWindow
+                + " inventory=" + potionInventory.allPotionDetails(ctx));
         return false;
     }
 

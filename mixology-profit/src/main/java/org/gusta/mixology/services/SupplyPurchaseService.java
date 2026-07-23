@@ -118,13 +118,15 @@ public class SupplyPurchaseService {
 
         snapshotAvailablePaste(ctx);
         bankChecked = true;
-        if (hasEnoughTargetStock()) {
+        if (hasEnoughTargetStock(ctx)) {
             existingSuppliesFound = true;
             stats.setStatus("Bank check OK: Mixology supplies already stocked "
                     + availablePasteSummary() + "; skipping GE buy");
         } else {
-            stats.setStatus("Bank check before herb buy: " + availablePasteSummary()
-                    + "; buying missing paste only");
+            String targetMode = longRestockMode
+                    ? "restocking paste reserve for 5-6h"
+                    : "targeting 800-1000 raw herbs per paste type";
+            stats.setStatus("Bank check before herb buy: " + availablePasteSummary() + "; " + targetMode);
         }
         ctx.bank().close();
         Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
@@ -135,26 +137,39 @@ public class SupplyPurchaseService {
         List<String> labels = new ArrayList<>();
         for (PasteType type : PasteType.values()) {
             int availablePaste = availablePasteByType.getOrDefault(type, 0);
-            if (availablePaste >= minTargetPaste()) {
-                labels.add(type.label() + "=" + availablePaste + " available; skip");
-                continue;
-            }
-
             PasteSourceQuote quote = profitPlanner.cheapestSource(ctx, type).orElse(null);
             if (quote == null) {
                 continue;
             }
 
-            int targetPaste = randomTargetPaste();
-            int missingPaste = Math.max(0, targetPaste - availablePaste);
-            int quantity = (int) Math.ceil((double) missingPaste / quote.source().pasteYield());
+            int targetPaste;
+            int quantity;
+            String label;
+            if (longRestockMode) {
+                if (availablePaste >= MixologySettings.MIN_RESTOCK_PASTE_PER_TYPE) {
+                    labels.add(type.label() + "=" + availablePaste + " paste available; skip");
+                    continue;
+                }
+                targetPaste = randomRestockTargetPaste();
+                int missingPaste = Math.max(0, targetPaste - availablePaste);
+                quantity = (int) Math.ceil((double) missingPaste / quote.source().pasteYield());
+                label = type.label() + "=" + availablePaste + "/" + targetPaste
+                        + " paste missing=" + missingPaste + " via " + quote.source().itemName();
+            } else {
+                int targetHerbs = randomStarterHerbTarget();
+                int equivalentRawHerbs = availablePaste / quote.source().pasteYield();
+                quantity = Math.max(0, targetHerbs - equivalentRawHerbs);
+                targetPaste = targetHerbs * quote.source().pasteYield();
+                label = type.label() + "=" + availablePaste + " paste; buy=" + quantity
+                        + "/" + targetHerbs + " herbs via " + quote.source().itemName()
+                        + " (yield=" + quote.source().pasteYield() + ")";
+            }
             if (quantity <= 0) {
                 labels.add(type.label() + "=" + availablePaste + " available; skip");
                 continue;
             }
             pendingPurchases.add(new PurchaseRequest(type, quote.source(), targetPaste, quantity, quote.unitBuyPrice()));
-            labels.add(type.label() + "=" + availablePaste + "/" + targetPaste
-                    + " missing=" + missingPaste + " via " + quote.source().itemName());
+            labels.add(label);
         }
 
         planned = true;
@@ -202,28 +217,34 @@ public class SupplyPurchaseService {
         return total;
     }
 
-    private boolean hasEnoughTargetStock() {
+    private boolean hasEnoughTargetStock(APIContext ctx) {
         for (PasteType type : PasteType.values()) {
-            if (availablePasteByType.getOrDefault(type, 0) < minTargetPaste()) {
+            int availablePaste = availablePasteByType.getOrDefault(type, 0);
+            if (longRestockMode) {
+                if (availablePaste < MixologySettings.MIN_RESTOCK_PASTE_PER_TYPE) {
+                    return false;
+                }
+                continue;
+            }
+
+            PasteSourceQuote quote = profitPlanner.cheapestSource(ctx, type).orElse(null);
+            if (quote == null || availablePaste
+                    < MixologySettings.MIN_STARTER_HERBS_PER_TYPE * quote.source().pasteYield()) {
                 return false;
             }
         }
         return true;
     }
 
-    private int minTargetPaste() {
-        return longRestockMode
-                ? MixologySettings.MIN_RESTOCK_PASTE_PER_TYPE
-                : MixologySettings.MIN_STARTER_PASTE_PER_TYPE;
+    private int randomStarterHerbTarget() {
+        return ThreadLocalRandom.current().nextInt(
+                MixologySettings.MIN_STARTER_HERBS_PER_TYPE,
+                MixologySettings.MAX_STARTER_HERBS_PER_TYPE + 1);
     }
 
-    private int randomTargetPaste() {
-        int min = longRestockMode
-                ? MixologySettings.MIN_RESTOCK_PASTE_PER_TYPE
-                : MixologySettings.MIN_STARTER_PASTE_PER_TYPE;
-        int max = longRestockMode
-                ? MixologySettings.MAX_RESTOCK_PASTE_PER_TYPE
-                : MixologySettings.MAX_STARTER_PASTE_PER_TYPE;
+    private int randomRestockTargetPaste() {
+        int min = MixologySettings.MIN_RESTOCK_PASTE_PER_TYPE;
+        int max = MixologySettings.MAX_RESTOCK_PASTE_PER_TYPE;
         return ThreadLocalRandom.current().nextInt(min, max + 1);
     }
 

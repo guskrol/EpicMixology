@@ -135,6 +135,10 @@ public class MixologyStats {
         return lastPotionFinalizerFinishedMessage;
     }
 
+    public long lastPotionFinalizerFinishedAt() {
+        return lastPotionFinalizerFinishedAt;
+    }
+
     public boolean hasPotionCollectedSince(long sinceMillis) {
         return lastPotionCollectedAt >= sinceMillis;
     }
