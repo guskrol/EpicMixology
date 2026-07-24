@@ -40,7 +40,7 @@ import java.util.List;
 
 @ScriptManifest(name = "Mixology Profit", gameType = GameType.OS)
 public class MixologyProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.96-minigame-scroll";
+    private static final String SCRIPT_VERSION = "v0.1.97-missing-paste-restock";
 
     private MixologyStats stats;
     private MixologyPaint paint;

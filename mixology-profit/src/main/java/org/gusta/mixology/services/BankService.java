@@ -52,6 +52,33 @@ public class BankService {
         return false;
     }
 
+    public boolean hasAnyInputForPaste(APIContext ctx, PasteType type) {
+        if (countInventoryItem(ctx, type.pasteName()) > 0) {
+            return true;
+        }
+
+        for (HerbSource source : HerbSources.all()) {
+            if (source.pasteType() == type && countInventoryItem(ctx, source.itemName()) > 0) {
+                return true;
+            }
+        }
+
+        if (!ctx.bank().isOpen()) {
+            return false;
+        }
+
+        if (ctx.bank().contains(type.pasteName())) {
+            return true;
+        }
+
+        for (HerbSource source : HerbSources.all()) {
+            if (source.pasteType() == type && ctx.bank().contains(source.itemName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public boolean hasAnyPaste(APIContext ctx) {
         for (PasteType type : PasteType.values()) {
             if (ctx.inventory().contains(type.pasteName())) {

@@ -293,6 +293,10 @@ public class MixologyRunner implements ScriptModule {
             return;
         }
 
+        if (handleMissingPasteSourceForHopperRestock(ctx)) {
+            return;
+        }
+
         if (!bulkStockingComplete
                 && bank.hasAnyBankPaste(ctx)
                 && (lastKnownHopperStock == null || !lastKnownHopperStock.isComplete())) {
@@ -337,6 +341,54 @@ public class MixologyRunner implements ScriptModule {
         }
 
         state = MixologyState.RETURN_TO_LEVERS;
+    }
+
+    private boolean handleMissingPasteSourceForHopperRestock(APIContext ctx) {
+        if (bulkStockingComplete || !ctx.bank().isOpen()) {
+            return false;
+        }
+
+        HopperStock stock = lastKnownHopperStock;
+        if (stock == null || !stock.isComplete()) {
+            return false;
+        }
+
+        PasteType missingType = firstUnderCapPasteWithoutInput(ctx, stock);
+        if (missingType == null) {
+            return false;
+        }
+
+        int current = stock.amount(missingType);
+        stats.setStatus("Missing " + missingType.label()
+                + " source for Hopper refill; going GE restock");
+        stats.debug("Hopper refill blocked: " + missingType.label()
+                + " current=" + current + "/"
+                + MixologySettings.MAX_HOPPER_PASTE_PER_TYPE
+                + ", no bank/inventory paste or matching herb source");
+
+        if (bank.hasAnyHerb(ctx) || bank.hasAnyPaste(ctx)) {
+            stats.setStatus("Banking carried Mixology supplies before GE restock");
+            ctx.bank().depositInventory();
+            Time.sleep(700, 1100, () -> !bank.hasAnyHerb(ctx) && !bank.hasAnyPaste(ctx), 100);
+        }
+
+        ctx.bank().close();
+        Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
+        restockRequested = true;
+        beginGeRestock();
+        return true;
+    }
+
+    private PasteType firstUnderCapPasteWithoutInput(APIContext ctx, HopperStock stock) {
+        for (PasteType type : PasteType.values()) {
+            int amount = stock.amount(type);
+            if (amount >= 0
+                    && amount < MixologySettings.MAX_HOPPER_PASTE_PER_TYPE
+                    && !bank.hasAnyInputForPaste(ctx, type)) {
+                return type;
+            }
+        }
+        return null;
     }
 
     private void loadHopper(APIContext ctx) {
