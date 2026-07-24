@@ -7,8 +7,8 @@ public class MixologySettings {
     public static final int REQUIRED_HERBLORE_LEVEL = 60;
     public static final int MIN_STARTER_HERBS_PER_TYPE = 800;
     public static final int MAX_STARTER_HERBS_PER_TYPE = 1000;
-    public static final int MIN_RESTOCK_PASTE_PER_TYPE = 3_500;
-    public static final int MAX_RESTOCK_PASTE_PER_TYPE = 4_500;
+    public static final int MIN_RESTOCK_PASTE_PER_TYPE = 6_000;
+    public static final int MAX_RESTOCK_PASTE_PER_TYPE = 7_200;
     public static final int MIN_EMPTY_SLOTS_FOR_ORDERS = 3;
     public static final int MAX_HOPPER_PASTE_PER_TYPE = 3_000;
 
