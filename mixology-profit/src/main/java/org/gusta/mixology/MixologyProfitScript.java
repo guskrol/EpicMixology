@@ -40,7 +40,7 @@ import java.util.List;
 
 @ScriptManifest(name = "Mixology Profit", gameType = GameType.OS)
 public class MixologyProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.00-travel-recovery";
+    private static final String SCRIPT_VERSION = "v0.2.01-teleport-search-lock";
 
     private MixologyStats stats;
     private MixologyPaint paint;

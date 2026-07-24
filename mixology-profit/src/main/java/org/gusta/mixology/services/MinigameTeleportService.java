@@ -28,8 +28,7 @@ public class MinigameTeleportService {
     private static final int MIXOLOGY_CARD_CHILD = 14;
     private static final int MIXOLOGY_SCROLL_CONTAINER_CHILD = 26;
     private static final int MIXOLOGY_SCROLL_DOWN_CHILD = 5;
-    private static final int MIXOLOGY_CARD_SCROLL_LIMIT = 7;
-    private static final int MIXOLOGY_CARD_CLICK_RETRIES = 10;
+    private static final int MIXOLOGY_CARD_SCROLL_LOG_WINDOW = 10;
 
     private final MixologySettings settings;
     private final MixologyStats stats;
@@ -160,31 +159,32 @@ public class MinigameTeleportService {
     private boolean selectMasteringMixology(APIContext ctx) {
         WidgetChild mixologyCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
         if (mixologyCard != null && mixologyCard.isValid()) {
-            if (clickScrollDownUntilMixologyVisible(ctx, mixologyCard)) {
-                return false;
-            }
-            if (scrollMixologyCardIntoView(ctx, mixologyCard)) {
+            if (isMasteringMixologyCardVisible(mixologyCard)) {
+                stats.setStatus("Selecting Mastering Mixology (widget 951.14)");
+                if (clickWidget(ctx, mixologyCard, "Select")) {
+                    mixologyCardScrollAttempts = 0;
+                    Time.sleep(500, 900);
+                    return true;
+                }
+                stats.debug("Mastering Mixology widget 951.14 rejected click after scroll attempts="
+                        + mixologyCardScrollAttempts + " bounds=" + safeBounds(mixologyCard));
                 return false;
             }
 
-            stats.setStatus("Selecting Mastering Mixology (widget 951.14)");
-            if (clickWidget(ctx, mixologyCard, "Select")) {
-                mixologyCardScrollAttempts = 0;
-                Time.sleep(500, 900);
-                return true;
+            if (clickScrollDownSearchingMixology(ctx, mixologyCard)) {
+                return false;
             }
-            stats.debug("Mastering Mixology widget 951.14 rejected click after scroll attempts="
-                    + mixologyCardScrollAttempts + " bounds=" + safeBounds(mixologyCard));
         }
 
         if (hasText(ctx, "mastering mixology")) {
             WidgetChild selected = findClickableText(ctx, "mastering mixology");
-            if (selected == null || click(ctx, selected)) {
+            if (selected != null && click(ctx, selected)) {
                 stats.setStatus("Selected Mastering Mixology teleport");
                 mixologyCardScrollAttempts = 0;
                 Time.sleep(500, 900);
                 return true;
             }
+            stats.debug("Mastering Mixology text is visible, but no clickable text widget accepted the click");
         }
 
         WidgetChild dropdown = ctx.widgets().get(InterfaceID.GROUPING, InterfaceID.Grouping.DROPDOWN);
@@ -201,14 +201,11 @@ public class MinigameTeleportService {
             return false;
         }
 
-        if (isMinigameTeleportPanelOpen(ctx) && mixologyCardScrollAttempts < MIXOLOGY_CARD_SCROLL_LIMIT) {
-            mixologyCardScrollAttempts++;
-            stats.setStatus("Scrolling minigame list searching Mastering Mixology "
-                    + mixologyCardScrollAttempts + "/" + MIXOLOGY_CARD_SCROLL_LIMIT);
-            WidgetChild list = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_LIST_CHILD);
-            if (list != null && list.isValid()) {
-                ctx.widgets().scroll(list, list);
+        if (isMinigameTeleportPanelOpen(ctx)) {
+            if (clickScrollDownSearchingMixology(ctx, mixologyCard)) {
+                return false;
             }
+            stats.setStatus("Mastering Mixology not visible yet; keeping minigame teleport search active");
             Time.sleep(450, 750);
             return false;
         }
@@ -219,12 +216,8 @@ public class MinigameTeleportService {
         return false;
     }
 
-    private boolean clickScrollDownUntilMixologyVisible(APIContext ctx, WidgetChild mixologyCard) {
-        if (mixologyCardScrollAttempts >= MIXOLOGY_CARD_CLICK_RETRIES) {
-            return false;
-        }
-        if (isWidgetInClickableArea(mixologyCard)
-                && normalize(widgetText(mixologyCard)).contains("mastering mixology")) {
+    private boolean clickScrollDownSearchingMixology(APIContext ctx, WidgetChild mixologyCard) {
+        if (isMasteringMixologyCardVisible(mixologyCard)) {
             return false;
         }
 
@@ -239,11 +232,19 @@ public class MinigameTeleportService {
         }
 
         mixologyCardScrollAttempts++;
+        int displayAttempt = ((mixologyCardScrollAttempts - 1) % MIXOLOGY_CARD_SCROLL_LOG_WINDOW) + 1;
         stats.setStatus("Clicking minigame list scroll button 951.26.5 for Mastering Mixology "
-                + mixologyCardScrollAttempts + "/" + MIXOLOGY_CARD_CLICK_RETRIES);
+                + displayAttempt + "/" + MIXOLOGY_CARD_SCROLL_LOG_WINDOW);
         clickWidget(ctx, scrollDown, "Scroll", "Select");
-        Time.sleep(180, 300);
+        Time.sleep(260, 420);
         return true;
+    }
+
+    private boolean isMasteringMixologyCardVisible(WidgetChild mixologyCard) {
+        return mixologyCard != null
+                && mixologyCard.isValid()
+                && isWidgetInClickableArea(mixologyCard)
+                && normalize(widgetTreeText(mixologyCard)).contains("mastering mixology");
     }
 
     private boolean isMixologyCardVisible(APIContext ctx) {
@@ -254,39 +255,6 @@ public class MinigameTeleportService {
     private boolean isMinigameTeleportPanelOpen(APIContext ctx) {
         WidgetChild list = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_LIST_CHILD);
         return isMixologyCardVisible(ctx) || (list != null && list.isValid()) || hasText(ctx, "mastering mixology");
-    }
-
-    private boolean scrollMixologyCardIntoView(APIContext ctx, WidgetChild mixologyCard) {
-        if (isWidgetInClickableArea(mixologyCard)
-                && normalize(widgetText(mixologyCard)).contains("mastering mixology")) {
-            return false;
-        }
-        if (mixologyCardScrollAttempts >= MIXOLOGY_CARD_SCROLL_LIMIT) {
-            return false;
-        }
-
-        WidgetChild list = mixologyCard.getParent();
-        if (list == null || !list.isValid()) {
-            list = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_LIST_CHILD);
-        }
-        if (list == null || !list.isValid()) {
-            stats.debug("Minigame list widget 951.4 unavailable while scrolling to Mixology card");
-            return false;
-        }
-
-        mixologyCardScrollAttempts++;
-        stats.setStatus("Scrolling minigame list to Mastering Mixology "
-                + mixologyCardScrollAttempts + "/" + MIXOLOGY_CARD_SCROLL_LIMIT);
-        boolean scrolled = ctx.widgets().scroll(list, mixologyCard);
-        stats.debug("Mixology teleport scroll attempt=" + mixologyCardScrollAttempts
-                + " scrolled=" + scrolled
-                + " cardBounds=" + safeBounds(mixologyCard)
-                + " listBounds=" + safeBounds(list));
-        if (scrolled || !isWidgetInClickableArea(mixologyCard)) {
-            Time.sleep(450, 750);
-            return true;
-        }
-        return false;
     }
 
     private boolean isWidgetInClickableArea(WidgetChild widget) {
@@ -332,6 +300,11 @@ public class MinigameTeleportService {
         }
 
         stats.setStatus("Teleport button unavailable; minigame teleport may be on cooldown");
+        if (isMinigameTeleportPanelOpen(ctx)) {
+            stats.debug("Teleport control missing while minigame panel is open; returning to card search");
+            mixologyCardSelected = false;
+            return true;
+        }
         mixologyCardSelected = false;
         mixologyCardScrollAttempts = 0;
         nextAttemptAt = System.currentTimeMillis() + 5_000L;
@@ -444,6 +417,27 @@ public class MinigameTeleportService {
             text = widget.getName();
         }
         return text == null ? "" : text.replace("<br>", " ").replaceAll("<[^>]+>", " ").trim();
+    }
+
+    private String widgetTreeText(WidgetChild widget) {
+        if (widget == null || !widget.isValid()) {
+            return "";
+        }
+        StringBuilder text = new StringBuilder(widgetText(widget));
+        try {
+            List<WidgetChild> children = widget.getChildren();
+            if (children != null) {
+                for (WidgetChild child : children) {
+                    String childText = widgetTreeText(child);
+                    if (!childText.isBlank()) {
+                        text.append(' ').append(childText);
+                    }
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // Widget children can refresh while the minigame panel scrolls.
+        }
+        return text.toString();
     }
 
     private boolean click(APIContext ctx, WidgetChild widget) {
