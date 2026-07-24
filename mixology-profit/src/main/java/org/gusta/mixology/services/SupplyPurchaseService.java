@@ -12,6 +12,7 @@ import org.gusta.mixology.config.MixologySettings;
 import org.gusta.mixology.data.HerbSources;
 import org.gusta.mixology.data.TravelItems;
 import org.gusta.mixology.domain.HerbSource;
+import org.gusta.mixology.domain.HopperStock;
 import org.gusta.mixology.domain.PasteSourceQuote;
 import org.gusta.mixology.domain.PasteType;
 import org.gusta.mixology.stats.MixologyStats;
@@ -37,6 +38,7 @@ public class SupplyPurchaseService {
     private final ProfitPlanner profitPlanner;
     private final Queue<PurchaseRequest> pendingPurchases = new ArrayDeque<>();
     private final Map<PasteType, Integer> availablePasteByType = new EnumMap<>(PasteType.class);
+    private final Map<PasteType, Integer> hopperPasteByType = new EnumMap<>(PasteType.class);
 
     private boolean bankChecked;
     private boolean existingSuppliesFound;
@@ -85,15 +87,26 @@ public class SupplyPurchaseService {
     }
 
     public void requestRestock() {
+        requestRestock(null);
+    }
+
+    public void requestRestock(HopperStock hopperStock) {
         bankChecked = false;
         existingSuppliesFound = false;
         planned = false;
         longRestockMode = true;
         pendingPurchases.clear();
         availablePasteByType.clear();
+        hopperPasteByType.clear();
         activePurchase = null;
         placedBatch.clear();
         nextBatchCollectAt = 0L;
+        if (hopperStock != null && hopperStock.isComplete()) {
+            for (PasteType type : PasteType.values()) {
+                hopperPasteByType.put(type, Math.max(0, hopperStock.amount(type)));
+            }
+            stats.debug("GE restock planning includes Hopper stock: " + hopperStock.summary());
+        }
     }
 
     private boolean checkBankForExistingSupplies(APIContext ctx) {
@@ -125,7 +138,7 @@ public class SupplyPurchaseService {
         } else {
             String targetMode = longRestockMode
                     ? "restocking paste reserve for 5-6h"
-                    : "targeting 800-1000 raw herbs per paste type";
+                    : "targeting starter paste reserve";
             stats.setStatus("Bank check before herb buy: " + availablePasteSummary() + "; " + targetMode);
         }
         ctx.bank().close();
@@ -142,28 +155,17 @@ public class SupplyPurchaseService {
                 continue;
             }
 
-            int targetPaste;
-            int quantity;
-            String label;
-            if (longRestockMode) {
-                if (availablePaste >= MixologySettings.MIN_RESTOCK_PASTE_PER_TYPE) {
-                    labels.add(type.label() + "=" + availablePaste + " paste available; skip");
-                    continue;
-                }
-                targetPaste = randomRestockTargetPaste();
-                int missingPaste = Math.max(0, targetPaste - availablePaste);
-                quantity = (int) Math.ceil((double) missingPaste / quote.source().pasteYield());
-                label = type.label() + "=" + availablePaste + "/" + targetPaste
-                        + " paste missing=" + missingPaste + " via " + quote.source().itemName();
-            } else {
-                int targetHerbs = randomStarterHerbTarget();
-                int equivalentRawHerbs = availablePaste / quote.source().pasteYield();
-                quantity = Math.max(0, targetHerbs - equivalentRawHerbs);
-                targetPaste = targetHerbs * quote.source().pasteYield();
-                label = type.label() + "=" + availablePaste + " paste; buy=" + quantity
-                        + "/" + targetHerbs + " herbs via " + quote.source().itemName()
-                        + " (yield=" + quote.source().pasteYield() + ")";
+            if (availablePaste >= MixologySettings.MIN_RESTOCK_PASTE_PER_TYPE) {
+                labels.add(type.label() + "=" + availablePaste + " paste available; skip");
+                continue;
             }
+
+            int targetPaste = randomRestockTargetPaste();
+            int missingPaste = Math.max(0, targetPaste - availablePaste);
+            int quantity = (int) Math.ceil((double) missingPaste / quote.source().pasteYield());
+            String label = type.label() + "=" + availablePaste + "/" + targetPaste
+                    + " paste missing=" + missingPaste + " via " + quote.source().itemName()
+                    + " (yield=" + quote.source().pasteYield() + ")";
             if (quantity <= 0) {
                 labels.add(type.label() + "=" + availablePaste + " available; skip");
                 continue;
@@ -187,10 +189,14 @@ public class SupplyPurchaseService {
     private int countAvailablePaste(APIContext ctx, PasteType type) {
         int pasteInventory = countInventoryItemByName(ctx, type.pasteName());
         int pasteBank = countBankItemByName(ctx, type.pasteName());
-        int total = pasteInventory + pasteBank;
+        int hopperPaste = hopperPasteByType.getOrDefault(type, 0);
+        int total = pasteInventory + pasteBank + hopperPaste;
         List<String> herbParts = new ArrayList<>();
         if (ctx.bank().isOpen()) {
             herbParts.add(type.pasteName() + "=" + pasteBank);
+        }
+        if (hopperPaste > 0) {
+            herbParts.add("hopper " + type.pasteName() + "=" + hopperPaste);
         }
         if (pasteInventory > 0) {
             herbParts.add("inv " + type.pasteName() + "=" + pasteInventory);
@@ -220,26 +226,11 @@ public class SupplyPurchaseService {
     private boolean hasEnoughTargetStock(APIContext ctx) {
         for (PasteType type : PasteType.values()) {
             int availablePaste = availablePasteByType.getOrDefault(type, 0);
-            if (longRestockMode) {
-                if (availablePaste < MixologySettings.MIN_RESTOCK_PASTE_PER_TYPE) {
-                    return false;
-                }
-                continue;
-            }
-
-            PasteSourceQuote quote = profitPlanner.cheapestSource(ctx, type).orElse(null);
-            if (quote == null || availablePaste
-                    < MixologySettings.MIN_STARTER_HERBS_PER_TYPE * quote.source().pasteYield()) {
+            if (availablePaste < MixologySettings.MIN_RESTOCK_PASTE_PER_TYPE) {
                 return false;
             }
         }
         return true;
-    }
-
-    private int randomStarterHerbTarget() {
-        return ThreadLocalRandom.current().nextInt(
-                MixologySettings.MIN_STARTER_HERBS_PER_TYPE,
-                MixologySettings.MAX_STARTER_HERBS_PER_TYPE + 1);
     }
 
     private int randomRestockTargetPaste() {

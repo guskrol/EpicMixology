@@ -13,6 +13,7 @@ import org.gusta.mixology.stats.MixologyStats;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Queue;
@@ -64,6 +65,7 @@ public class TravelLoadoutService {
     private final List<LoadoutPurchase> missingAfterBankCheck = new ArrayList<>();
 
     private GearItem[] selectedGear;
+    private boolean allowOptionalGearPurchases;
     private boolean bankCheckedForLoadout;
     private boolean geCheckedForExistingOffers;
     private boolean purchasesPlanned;
@@ -229,6 +231,11 @@ public class TravelLoadoutService {
                     true
             ));
         }
+        if (!allowOptionalGearPurchases) {
+            stats.debug("Optional gear GE buy disabled because existing travel gear was found: "
+                    + selectedGearSummary());
+            return;
+        }
         for (GearItem item : selectedGear) {
             if (!hasEquippedInventoryOrBank(ctx, item.name)) {
                 missing.add(new LoadoutPurchase(
@@ -314,11 +321,36 @@ public class TravelLoadoutService {
             return;
         }
 
+        int bestIndex = -1;
+        int bestScore = -1;
+        for (int i = 0; i < RANDOM_GEAR_PRESETS.length; i++) {
+            int score = gearAvailabilityScore(ctx, RANDOM_GEAR_PRESETS[i]);
+            if (score > bestScore) {
+                bestScore = score;
+                bestIndex = i;
+            }
+        }
+
+        if (bestScore > 0) {
+            List<GearItem> availableGear = new ArrayList<>();
+            for (GearItem item : RANDOM_GEAR_PRESETS[bestIndex]) {
+                if (hasEquippedInventoryOrBank(ctx, item.name)) {
+                    availableGear.add(item);
+                }
+            }
+            selectedGear = availableGear.toArray(new GearItem[0]);
+            allowOptionalGearPurchases = false;
+            stats.debug("Selected existing travel gear preset index=" + bestIndex
+                    + " availablePieces=" + bestScore + "/" + RANDOM_GEAR_PRESETS[bestIndex].length
+                    + "; GE optional gear buy disabled");
+            return;
+        }
+
         int index = ThreadLocalRandom.current().nextInt(RANDOM_GEAR_PRESETS.length);
-        int availabilityScore = gearAvailabilityScore(ctx, RANDOM_GEAR_PRESETS[index]);
-        stats.debug("Randomized travel gear preset: index=" + index
-                + " availablePieces=" + availabilityScore + "/" + RANDOM_GEAR_PRESETS[index].length);
-        selectedGear = RANDOM_GEAR_PRESETS[index];
+        selectedGear = Arrays.copyOf(RANDOM_GEAR_PRESETS[index], RANDOM_GEAR_PRESETS[index].length);
+        allowOptionalGearPurchases = true;
+        stats.debug("No existing travel gear found; selected random travel gear preset index=" + index
+                + " for GE purchase");
     }
 
     private int gearAvailabilityScore(APIContext ctx, GearItem[] preset) {
@@ -808,8 +840,8 @@ public class TravelLoadoutService {
     }
 
     private boolean hasEquippedInventoryOrBank(APIContext ctx, String itemName) {
-        return ctx.equipment().contains(itemName)
-                || ctx.inventory().contains(itemName)
+        return hasEquippedItem(ctx, itemName)
+                || hasInventoryItem(ctx, itemName)
                 || firstBankItem(ctx, itemName) != null;
     }
 

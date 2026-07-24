@@ -615,7 +615,7 @@ public class MixologyRunner implements ScriptModule {
     }
 
     private void beginGeRestock() {
-        supplyPurchase.requestRestock();
+        supplyPurchase.requestRestock(lastKnownHopperStock);
         travelLoadout.resetForRestock();
         lastKnownHopperStock = null;
         lastKnownHopperStockAt = 0L;
