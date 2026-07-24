@@ -28,7 +28,7 @@ public class MinigameTeleportService {
     private static final int MIXOLOGY_CARD_CHILD = 14;
     private static final int MIXOLOGY_SCROLL_CONTAINER_CHILD = 26;
     private static final int MIXOLOGY_SCROLL_DOWN_CHILD = 5;
-    private static final int MIXOLOGY_CARD_SCROLL_LOG_WINDOW = 15;
+    private static final int MIXOLOGY_CARD_SCROLL_LOG_WINDOW = 20;
     private static final int MIXOLOGY_CARD_MIN_SCROLLS_BEFORE_SELECT = 8;
 
     private final MixologySettings settings;
@@ -160,7 +160,7 @@ public class MinigameTeleportService {
     private boolean selectMasteringMixology(APIContext ctx) {
         WidgetChild mixologyCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
         if (mixologyCard != null && mixologyCard.isValid()) {
-            if (isMasteringMixologyCardVisible(mixologyCard)) {
+            if (isMasteringMixologyCardReadyForClick(mixologyCard)) {
                 if (mixologyCardScrollAttempts < MIXOLOGY_CARD_MIN_SCROLLS_BEFORE_SELECT
                         && clickScrollDownSearchingMixology(ctx, mixologyCard, true)) {
                     return false;
@@ -233,7 +233,7 @@ public class MinigameTeleportService {
     }
 
     private boolean clickScrollDownSearchingMixology(APIContext ctx, WidgetChild mixologyCard, boolean force) {
-        if (!force && isMasteringMixologyCardVisible(mixologyCard)) {
+        if (!force && isMasteringMixologyCardReadyForClick(mixologyCard)) {
             return false;
         }
 
@@ -247,20 +247,40 @@ public class MinigameTeleportService {
             return false;
         }
 
-        mixologyCardScrollAttempts++;
-        int displayAttempt = ((mixologyCardScrollAttempts - 1) % MIXOLOGY_CARD_SCROLL_LOG_WINDOW) + 1;
+        int displayAttempt = (mixologyCardScrollAttempts % MIXOLOGY_CARD_SCROLL_LOG_WINDOW) + 1;
         stats.setStatus("Clicking minigame list scroll button 951.26.5 for Mastering Mixology "
                 + displayAttempt + "/" + MIXOLOGY_CARD_SCROLL_LOG_WINDOW);
-        clickWidget(ctx, scrollDown, "Scroll", "Select");
-        Time.sleep(260, 420);
+        Rectangle beforeBounds = safeBounds(mixologyCard);
+        boolean clicked = clickWidget(ctx, scrollDown, "Scroll", "Select");
+        if (!clicked) {
+            stats.debug("Minigame teleport scroll widget rejected click; not counting this attempt");
+            Time.sleep(450, 700);
+            return false;
+        }
+
+        Time.sleep(650, 950, () -> hasScrollMovedOrCardReady(ctx, beforeBounds), 100);
+        mixologyCardScrollAttempts++;
         return true;
     }
 
-    private boolean isMasteringMixologyCardVisible(WidgetChild mixologyCard) {
+    private boolean isMasteringMixologyCardReadyForClick(WidgetChild mixologyCard) {
         return mixologyCard != null
                 && mixologyCard.isValid()
                 && isWidgetInClickableArea(mixologyCard)
+                && isWidgetInTeleportListClickZone(mixologyCard)
                 && normalize(widgetTreeText(mixologyCard)).contains("mastering mixology");
+    }
+
+    private boolean hasScrollMovedOrCardReady(APIContext ctx, Rectangle beforeBounds) {
+        WidgetChild card = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
+        if (isMasteringMixologyCardReadyForClick(card)) {
+            return true;
+        }
+        Rectangle afterBounds = safeBounds(card);
+        if (beforeBounds == null || afterBounds == null) {
+            return false;
+        }
+        return beforeBounds.x != afterBounds.x || beforeBounds.y != afterBounds.y;
     }
 
     private boolean isMixologyCardVisible(APIContext ctx) {
@@ -282,6 +302,22 @@ public class MinigameTeleportService {
                 && bounds.y >= 0
                 && bounds.x < 1900
                 && bounds.y < 1050;
+    }
+
+    private boolean isWidgetInTeleportListClickZone(WidgetChild widget) {
+        Rectangle bounds = safeBounds(widget);
+        if (bounds == null) {
+            return false;
+        }
+
+        // The card can exist in the widget tree while clipped outside the visible scroll list.
+        // Only select it once it is inside the middle list area the player can actually click.
+        int centerX = bounds.x + bounds.width / 2;
+        int centerY = bounds.y + bounds.height / 2;
+        return centerX >= 720
+                && centerX <= 1200
+                && centerY >= 300
+                && centerY <= 720;
     }
 
     private Rectangle safeBounds(WidgetChild widget) {
