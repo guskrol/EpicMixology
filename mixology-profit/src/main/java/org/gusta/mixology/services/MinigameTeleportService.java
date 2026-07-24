@@ -28,7 +28,8 @@ public class MinigameTeleportService {
     private static final int MIXOLOGY_CARD_CHILD = 14;
     private static final int MIXOLOGY_SCROLL_CONTAINER_CHILD = 26;
     private static final int MIXOLOGY_SCROLL_DOWN_CHILD = 5;
-    private static final int MIXOLOGY_CARD_SCROLL_LOG_WINDOW = 10;
+    private static final int MIXOLOGY_CARD_SCROLL_LOG_WINDOW = 15;
+    private static final int MIXOLOGY_CARD_MIN_SCROLLS_BEFORE_SELECT = 8;
 
     private final MixologySettings settings;
     private final MixologyStats stats;
@@ -160,14 +161,19 @@ public class MinigameTeleportService {
         WidgetChild mixologyCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
         if (mixologyCard != null && mixologyCard.isValid()) {
             if (isMasteringMixologyCardVisible(mixologyCard)) {
+                if (mixologyCardScrollAttempts < MIXOLOGY_CARD_MIN_SCROLLS_BEFORE_SELECT
+                        && clickScrollDownSearchingMixology(ctx, mixologyCard, true)) {
+                    return false;
+                }
                 stats.setStatus("Selecting Mastering Mixology (widget 951.14)");
                 if (clickWidget(ctx, mixologyCard, "Select")) {
-                    mixologyCardScrollAttempts = 0;
                     Time.sleep(600, 900, () -> findPanelTeleportControl(ctx) != null, 100);
                     if (findPanelTeleportControl(ctx) != null) {
+                        mixologyCardScrollAttempts = 0;
                         return true;
                     }
-                    stats.debug("Mastering Mixology card clicked, but final teleport button is not visible yet");
+                    stats.debug("Mastering Mixology card clicked, but final teleport button is not visible yet; continuing scroll search");
+                    clickScrollDownSearchingMixology(ctx, mixologyCard, true);
                     Time.sleep(350, 650);
                     return false;
                 }
@@ -176,7 +182,7 @@ public class MinigameTeleportService {
                 return false;
             }
 
-            if (clickScrollDownSearchingMixology(ctx, mixologyCard)) {
+            if (clickScrollDownSearchingMixology(ctx, mixologyCard, false)) {
                 return false;
             }
         }
@@ -185,12 +191,13 @@ public class MinigameTeleportService {
             WidgetChild selected = findClickableText(ctx, "mastering mixology");
             if (selected != null && click(ctx, selected)) {
                 stats.setStatus("Selected Mastering Mixology teleport");
-                mixologyCardScrollAttempts = 0;
                 Time.sleep(600, 900, () -> findPanelTeleportControl(ctx) != null, 100);
                 if (findPanelTeleportControl(ctx) != null) {
+                    mixologyCardScrollAttempts = 0;
                     return true;
                 }
-                stats.debug("Mastering Mixology text clicked, but final teleport button is not visible yet");
+                stats.debug("Mastering Mixology text clicked, but final teleport button is not visible yet; continuing scroll search");
+                clickScrollDownSearchingMixology(ctx, mixologyCard, true);
                 return false;
             }
             stats.debug("Mastering Mixology text is visible, but no clickable text widget accepted the click");
@@ -211,7 +218,7 @@ public class MinigameTeleportService {
         }
 
         if (isMinigameTeleportPanelOpen(ctx)) {
-            if (clickScrollDownSearchingMixology(ctx, mixologyCard)) {
+            if (clickScrollDownSearchingMixology(ctx, mixologyCard, false)) {
                 return false;
             }
             stats.setStatus("Mastering Mixology not visible yet; keeping minigame teleport search active");
@@ -225,8 +232,8 @@ public class MinigameTeleportService {
         return false;
     }
 
-    private boolean clickScrollDownSearchingMixology(APIContext ctx, WidgetChild mixologyCard) {
-        if (isMasteringMixologyCardVisible(mixologyCard)) {
+    private boolean clickScrollDownSearchingMixology(APIContext ctx, WidgetChild mixologyCard, boolean force) {
+        if (!force && isMasteringMixologyCardVisible(mixologyCard)) {
             return false;
         }
 
