@@ -39,6 +39,7 @@ public class SupplyPurchaseService {
     private final Queue<PurchaseRequest> pendingPurchases = new ArrayDeque<>();
     private final Map<PasteType, Integer> availablePasteByType = new EnumMap<>(PasteType.class);
     private final Map<PasteType, Integer> hopperPasteByType = new EnumMap<>(PasteType.class);
+    private final Map<PasteType, Integer> targetPasteByType = new EnumMap<>(PasteType.class);
 
     private boolean bankChecked;
     private boolean existingSuppliesFound;
@@ -98,6 +99,7 @@ public class SupplyPurchaseService {
         pendingPurchases.clear();
         availablePasteByType.clear();
         hopperPasteByType.clear();
+        targetPasteByType.clear();
         activePurchase = null;
         placedBatch.clear();
         nextBatchCollectAt = 0L;
@@ -150,17 +152,20 @@ public class SupplyPurchaseService {
         List<String> labels = new ArrayList<>();
         for (PasteType type : PasteType.values()) {
             int availablePaste = availablePasteByType.getOrDefault(type, 0);
+            int targetPaste = restockTargetFor(type);
             PasteSourceQuote quote = profitPlanner.cheapestSource(ctx, type).orElse(null);
             if (quote == null) {
+                labels.add(type.label() + "=" + availablePaste + "/" + targetPaste
+                        + " paste; no GE source found");
                 continue;
             }
 
-            if (availablePaste >= MixologySettings.MIN_RESTOCK_PASTE_PER_TYPE) {
-                labels.add(type.label() + "=" + availablePaste + " paste available; skip");
+            if (availablePaste >= targetPaste) {
+                labels.add(type.label() + "=" + availablePaste + "/" + targetPaste
+                        + " paste available; skip");
                 continue;
             }
 
-            int targetPaste = randomRestockTargetPaste();
             int missingPaste = Math.max(0, targetPaste - availablePaste);
             int quantity = (int) Math.ceil((double) missingPaste / quote.source().pasteYield());
             String label = type.label() + "=" + availablePaste + "/" + targetPaste
@@ -176,6 +181,16 @@ public class SupplyPurchaseService {
 
         planned = true;
         stats.setStatus("Planned Mixology GE supplies: " + String.join(", ", labels));
+    }
+
+    private int restockTargetFor(PasteType type) {
+        Integer existing = targetPasteByType.get(type);
+        if (existing != null && existing > 0) {
+            return existing;
+        }
+        int target = randomRestockTargetPaste();
+        targetPasteByType.put(type, target);
+        return target;
     }
 
     private void snapshotAvailablePaste(APIContext ctx) {
@@ -226,7 +241,10 @@ public class SupplyPurchaseService {
     private boolean hasEnoughTargetStock(APIContext ctx) {
         for (PasteType type : PasteType.values()) {
             int availablePaste = availablePasteByType.getOrDefault(type, 0);
-            if (availablePaste < MixologySettings.MIN_RESTOCK_PASTE_PER_TYPE) {
+            int requiredPaste = longRestockMode
+                    ? restockTargetFor(type)
+                    : MixologySettings.MIN_RESTOCK_PASTE_PER_TYPE;
+            if (availablePaste < requiredPaste) {
                 return false;
             }
         }

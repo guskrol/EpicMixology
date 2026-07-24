@@ -27,8 +27,8 @@ public class MinigameTeleportService {
     private static final int MIXOLOGY_CARD_GROUP = 951;
     private static final int MIXOLOGY_CARD_LIST_CHILD = 4;
     private static final int MIXOLOGY_CARD_CHILD = 14;
-    private static final int MIXOLOGY_CARD_SCROLL_LOG_WINDOW = 30;
-    private static final int MOUSE_SCROLL_BATCH = 3;
+    private static final int MIXOLOGY_CARD_SCROLL_LOG_WINDOW = 120;
+    private static final int MOUSE_SCROLL_BATCH = 18;
 
     private final MixologySettings settings;
     private final MixologyStats stats;
@@ -157,33 +157,35 @@ public class MinigameTeleportService {
     }
 
     private boolean selectMasteringMixology(APIContext ctx) {
-        WidgetChild mixologyCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
-        if (mixologyCard != null && mixologyCard.isValid()) {
-            if (isMasteringMixologyCardReadyForClick(mixologyCard)) {
-                stats.setStatus("Selecting Mastering Mixology (widget 951.14)");
-                if (clickWidget(ctx, mixologyCard, "Select")) {
+        WidgetChild visibleMixologyCard = findVisibleMasteringMixologyCard(ctx);
+        if (visibleMixologyCard != null) {
+                stats.setStatus("Selecting Mastering Mixology (visible card)");
+                if (selectTeleportCard(ctx, visibleMixologyCard)) {
                     Time.sleep(600, 900, () -> findPanelTeleportControl(ctx) != null, 100);
                     if (findPanelTeleportControl(ctx) != null) {
                         mixologyCardScrollAttempts = 0;
                         return true;
                     }
                     stats.debug("Mastering Mixology card clicked, but final teleport button is not visible yet; continuing scroll search");
+                    mixologyCardSelected = false;
                     mouseWheelSearchingMixology(ctx, true);
                     Time.sleep(350, 650);
                     return false;
                 }
-                stats.debug("Mastering Mixology widget 951.14 rejected click after scroll attempts="
-                        + mixologyCardScrollAttempts + " bounds=" + safeBounds(mixologyCard));
+                stats.debug("Visible Mastering Mixology card rejected click after scroll attempts="
+                        + mixologyCardScrollAttempts + " bounds=" + safeBounds(visibleMixologyCard));
                 return false;
-            }
+        }
 
+        WidgetChild mixologyCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
+        if (mixologyCard != null && mixologyCard.isValid()) {
             if (mouseWheelSearchingMixology(ctx, false)) {
                 return false;
             }
         }
 
         if (hasText(ctx, "mastering mixology")) {
-            WidgetChild selected = findClickableText(ctx, "mastering mixology");
+            WidgetChild selected = findVisibleClickableText(ctx, "mastering mixology");
             if (selected != null && click(ctx, selected)) {
                 stats.setStatus("Selected Mastering Mixology teleport");
                 Time.sleep(600, 900, () -> findPanelTeleportControl(ctx) != null, 100);
@@ -268,7 +270,7 @@ public class MinigameTeleportService {
             String beforeFingerprint
     ) {
         ctx.mouse().scroll(direction, MOUSE_SCROLL_BATCH);
-        return Time.sleep(700, 1100,
+        return Time.sleep(1200, 1800,
                 () -> hasScrollMovedOrCardReady(ctx, beforeBounds)
                         || !visibleTeleportListFingerprint(ctx).equals(beforeFingerprint),
                 100);
@@ -337,6 +339,25 @@ public class MinigameTeleportService {
                 && isWidgetInClickableArea(mixologyCard)
                 && isWidgetInTeleportListClickZone(mixologyCard)
                 && normalize(widgetTreeText(mixologyCard)).contains("mastering mixology");
+    }
+
+    private WidgetChild findVisibleMasteringMixologyCard(APIContext ctx) {
+        WidgetChild fixedCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
+        if (isMasteringMixologyCardReadyForClick(fixedCard)) {
+            return fixedCard;
+        }
+
+        List<WidgetChild> widgets = widgetSnapshot(ctx, widget -> {
+            if (widget == null || !widget.isValid() || !isWidgetInClickableArea(widget)) {
+                return false;
+            }
+            if (!isWidgetInTeleportListClickZone(widget)) {
+                return false;
+            }
+            return normalize(widgetTreeText(widget)).contains("mastering mixology")
+                    || normalize(widgetText(widget)).contains("mastering mixology");
+        });
+        return widgets.isEmpty() ? null : widgets.get(0);
     }
 
     private boolean hasScrollMovedOrCardReady(APIContext ctx, Rectangle beforeBounds) {
@@ -609,6 +630,17 @@ public class MinigameTeleportService {
         return clickWidget(ctx, widget, "Cast", "Teleport", "Select", "Choose");
     }
 
+    private boolean selectTeleportCard(APIContext ctx, WidgetChild widget) {
+        if (widget == null || !widget.isValid()) {
+            return false;
+        }
+        return widget.interact("Select")
+                || widget.interact("Select", widgetText(widget))
+                || ctx.mouse().click(widget, false)
+                || widget.click(false)
+                || widget.click();
+    }
+
     private boolean clickWidget(APIContext ctx, WidgetChild widget, String... actions) {
         if (widget == null || !widget.isValid()) {
             return false;
@@ -622,6 +654,29 @@ public class MinigameTeleportService {
             }
         }
         return widget.interact(false) || widget.click(false) || widget.click();
+    }
+
+    private WidgetChild findVisibleClickableText(APIContext ctx, String... needles) {
+        List<WidgetChild> widgets = widgetSnapshot(ctx, widget -> {
+            try {
+                if (widget == null || !widget.isValid() || widget.getWidth() <= 0 || widget.getHeight() <= 0) {
+                    return false;
+                }
+                if (!isWidgetInClickableArea(widget) || !isWidgetInTeleportListClickZone(widget)) {
+                    return false;
+                }
+                String text = normalize(widgetText(widget));
+                for (String needle : needles) {
+                    if (text.contains(normalize(needle))) {
+                        return true;
+                    }
+                }
+                return false;
+            } catch (RuntimeException ignored) {
+                return false;
+            }
+        });
+        return widgets.isEmpty() ? null : widgets.get(0);
     }
 
     private String normalize(String value) {
