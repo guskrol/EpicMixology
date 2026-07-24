@@ -26,7 +26,10 @@ public class MinigameTeleportService {
     private static final int MIXOLOGY_CARD_GROUP = 951;
     private static final int MIXOLOGY_CARD_LIST_CHILD = 4;
     private static final int MIXOLOGY_CARD_CHILD = 14;
+    private static final int MIXOLOGY_SCROLL_CONTAINER_CHILD = 26;
+    private static final int MIXOLOGY_SCROLL_DOWN_CHILD = 5;
     private static final int MIXOLOGY_CARD_SCROLL_LIMIT = 7;
+    private static final int MIXOLOGY_CARD_CLICK_RETRIES = 10;
 
     private final MixologySettings settings;
     private final MixologyStats stats;
@@ -157,6 +160,9 @@ public class MinigameTeleportService {
     private boolean selectMasteringMixology(APIContext ctx) {
         WidgetChild mixologyCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
         if (mixologyCard != null && mixologyCard.isValid()) {
+            if (clickScrollDownUntilMixologyVisible(ctx, mixologyCard)) {
+                return false;
+            }
             if (scrollMixologyCardIntoView(ctx, mixologyCard)) {
                 return false;
             }
@@ -213,6 +219,33 @@ public class MinigameTeleportService {
         return false;
     }
 
+    private boolean clickScrollDownUntilMixologyVisible(APIContext ctx, WidgetChild mixologyCard) {
+        if (mixologyCardScrollAttempts >= MIXOLOGY_CARD_CLICK_RETRIES) {
+            return false;
+        }
+        if (isWidgetInClickableArea(mixologyCard)
+                && normalize(widgetText(mixologyCard)).contains("mastering mixology")) {
+            return false;
+        }
+
+        WidgetChild scrollDown = getNestedWidget(
+                ctx,
+                MIXOLOGY_CARD_GROUP,
+                MIXOLOGY_SCROLL_CONTAINER_CHILD,
+                MIXOLOGY_SCROLL_DOWN_CHILD
+        );
+        if (scrollDown == null || !scrollDown.isValid()) {
+            return false;
+        }
+
+        mixologyCardScrollAttempts++;
+        stats.setStatus("Clicking minigame list scroll button 951.26.5 for Mastering Mixology "
+                + mixologyCardScrollAttempts + "/" + MIXOLOGY_CARD_CLICK_RETRIES);
+        clickWidget(ctx, scrollDown, "Scroll", "Select");
+        Time.sleep(180, 300);
+        return true;
+    }
+
     private boolean isMixologyCardVisible(APIContext ctx) {
         WidgetChild mixologyCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
         return mixologyCard != null && mixologyCard.isValid();
@@ -224,7 +257,8 @@ public class MinigameTeleportService {
     }
 
     private boolean scrollMixologyCardIntoView(APIContext ctx, WidgetChild mixologyCard) {
-        if (isWidgetInClickableArea(mixologyCard) && mixologyCardScrollAttempts > 0) {
+        if (isWidgetInClickableArea(mixologyCard)
+                && normalize(widgetText(mixologyCard)).contains("mastering mixology")) {
             return false;
         }
         if (mixologyCardScrollAttempts >= MIXOLOGY_CARD_SCROLL_LIMIT) {
@@ -300,8 +334,30 @@ public class MinigameTeleportService {
         stats.setStatus("Teleport button unavailable; minigame teleport may be on cooldown");
         mixologyCardSelected = false;
         mixologyCardScrollAttempts = 0;
-        nextAttemptAt = System.currentTimeMillis() + QUICK_RETRY_MILLIS;
+        nextAttemptAt = System.currentTimeMillis() + 5_000L;
         return false;
+    }
+
+    private WidgetChild getNestedWidget(APIContext ctx, int group, int... childIndexes) {
+        if (childIndexes.length == 0) {
+            return null;
+        }
+
+        WidgetChild current = ctx.widgets().get(group, childIndexes[0]);
+        for (int i = 1; i < childIndexes.length && current != null && current.isValid(); i++) {
+            List<WidgetChild> children = current.getChildren();
+            if (children == null || children.isEmpty()) {
+                return null;
+            }
+            current = null;
+            for (WidgetChild child : children) {
+                if (child != null && child.isValid() && child.getIndex() == childIndexes[i]) {
+                    current = child;
+                    break;
+                }
+            }
+        }
+        return current;
     }
 
     private void waitForTeleport(APIContext ctx) {

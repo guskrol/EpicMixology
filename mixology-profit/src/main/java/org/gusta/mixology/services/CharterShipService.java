@@ -116,6 +116,14 @@ public class CharterShipService {
             Time.sleep(150, 300);
             return true;
         }
+        if (trader.tileDistanceTo(ctx) > 3 && !ctx.localPlayer().isMoving()) {
+            stats.setStatus("Walking next to Trader Crewmember before charter interaction: "
+                    + describeTrader(ctx, trader));
+            ctx.webWalking().setUseTeleports(false);
+            ctx.webWalking().walkTo(trader.getLocation());
+            Time.sleep(900, 1400, () -> trader.tileDistanceTo(ctx) <= 3 || ctx.localPlayer().isMoving(), 100);
+            return true;
+        }
 
         stats.setStatus("Charter NPC found; interacting with " + describeTrader(ctx, trader));
         ctx.camera().turnTo(trader);
@@ -124,10 +132,18 @@ public class CharterShipService {
                 || trader.interactMatch("Charter")
                 || ctx.menu().interact("Charter", "Trader Crewmember", trader, true)
                 || ctx.menu().interact("Charter", trader, true)
-                || ctx.menu().interact("Charter", trader, false);
+                || ctx.menu().interact("Charter", trader, false)
+                || trader.interact("Talk-to", "Trader Crewmember")
+                || trader.interact("Talk-to")
+                || ctx.menu().interact("Talk-to", "Trader Crewmember", trader, true)
+                || ctx.menu().interact("Talk-to", trader, true);
         if (interacted) {
             markCharterInteraction();
-            waitForCharterInterface(ctx);
+            boolean opened = waitForCharterInterface(ctx);
+            if (!opened) {
+                stats.debug("Trader Crewmember interaction did not open charter interface/dialogue yet; will retry. "
+                        + describeTrader(ctx, trader));
+            }
             return true;
         }
 
@@ -208,12 +224,16 @@ public class CharterShipService {
                 || ctx.menu().interact("Charter", trader, true)
                 || ctx.menu().interact("Charter", trader, false)
                 || ctx.menu().interact("Charter", true)
-                || ctx.menu().interact("Charter", false);
+                || ctx.menu().interact("Charter", false)
+                || ctx.menu().interact("Talk-to", "Trader Crewmember", trader, true)
+                || ctx.menu().interact("Talk-to", trader, true)
+                || ctx.menu().interact("Talk-to", true);
     }
 
-    private void waitForCharterInterface(APIContext ctx) {
+    private boolean waitForCharterInterface(APIContext ctx) {
         Time.sleep(900, 1500,
                 () -> hasWidgetText(ctx, "aldarin") || ctx.dialogues().isDialogueOpen(), 100);
+        return hasWidgetText(ctx, "aldarin") || ctx.dialogues().isDialogueOpen() || ctx.dialogues().isChatOpen();
     }
 
     private void markCharterInteraction() {
