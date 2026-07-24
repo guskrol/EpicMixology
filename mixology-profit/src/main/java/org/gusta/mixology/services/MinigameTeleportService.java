@@ -163,8 +163,13 @@ public class MinigameTeleportService {
                 stats.setStatus("Selecting Mastering Mixology (widget 951.14)");
                 if (clickWidget(ctx, mixologyCard, "Select")) {
                     mixologyCardScrollAttempts = 0;
-                    Time.sleep(500, 900);
-                    return true;
+                    Time.sleep(600, 900, () -> findPanelTeleportControl(ctx) != null, 100);
+                    if (findPanelTeleportControl(ctx) != null) {
+                        return true;
+                    }
+                    stats.debug("Mastering Mixology card clicked, but final teleport button is not visible yet");
+                    Time.sleep(350, 650);
+                    return false;
                 }
                 stats.debug("Mastering Mixology widget 951.14 rejected click after scroll attempts="
                         + mixologyCardScrollAttempts + " bounds=" + safeBounds(mixologyCard));
@@ -181,8 +186,12 @@ public class MinigameTeleportService {
             if (selected != null && click(ctx, selected)) {
                 stats.setStatus("Selected Mastering Mixology teleport");
                 mixologyCardScrollAttempts = 0;
-                Time.sleep(500, 900);
-                return true;
+                Time.sleep(600, 900, () -> findPanelTeleportControl(ctx) != null, 100);
+                if (findPanelTeleportControl(ctx) != null) {
+                    return true;
+                }
+                stats.debug("Mastering Mixology text clicked, but final teleport button is not visible yet");
+                return false;
             }
             stats.debug("Mastering Mixology text is visible, but no clickable text widget accepted the click");
         }
@@ -285,18 +294,22 @@ public class MinigameTeleportService {
     }
 
     private boolean clickTeleport(APIContext ctx) {
-        WidgetChild teleport = ctx.widgets().get(InterfaceID.GROUPING, InterfaceID.Grouping.TELEPORT);
-        if (teleport != null && teleport.isValid() && click(ctx, teleport)) {
+        WidgetChild teleport = findPanelTeleportControl(ctx);
+        if (teleport != null && clickTeleportControl(ctx, teleport)) {
             stats.setStatus("Using Mastering Mixology minigame teleport");
             waitForTeleport(ctx);
             return true;
         }
 
-        WidgetChild teleportText = findClickableText(ctx, "teleport");
-        if (teleportText != null && click(ctx, teleportText)) {
-            stats.setStatus("Using Mastering Mixology minigame teleport");
-            waitForTeleport(ctx);
-            return true;
+        if (mixologyCardSelected && isMinigameTeleportPanelOpen(ctx)) {
+            stats.setStatus("Waiting for Mastering Mixology final teleport button");
+            Time.sleep(600, 900, () -> findPanelTeleportControl(ctx) != null, 100);
+            teleport = findPanelTeleportControl(ctx);
+            if (teleport != null && clickTeleportControl(ctx, teleport)) {
+                stats.setStatus("Using Mastering Mixology minigame teleport");
+                waitForTeleport(ctx);
+                return true;
+            }
         }
 
         stats.setStatus("Teleport button unavailable; minigame teleport may be on cooldown");
@@ -309,6 +322,47 @@ public class MinigameTeleportService {
         mixologyCardScrollAttempts = 0;
         nextAttemptAt = System.currentTimeMillis() + 5_000L;
         return false;
+    }
+
+    private WidgetChild findPanelTeleportControl(APIContext ctx) {
+        WidgetChild legacyTeleport = ctx.widgets().get(InterfaceID.GROUPING, InterfaceID.Grouping.TELEPORT);
+        if (isLikelyTeleportControl(legacyTeleport)) {
+            return legacyTeleport;
+        }
+
+        List<WidgetChild> widgets = widgetSnapshot(ctx, widget -> {
+            if (!isLikelyTeleportControl(widget)) {
+                return false;
+            }
+            Rectangle bounds = safeBounds(widget);
+            if (bounds == null) {
+                return false;
+            }
+            return bounds.y > 180 && bounds.y < 850 && bounds.x > 250 && bounds.x < 1550;
+        });
+        return widgets.isEmpty() ? null : widgets.get(0);
+    }
+
+    private boolean isLikelyTeleportControl(WidgetChild widget) {
+        if (widget == null || !widget.isValid() || !isWidgetInClickableArea(widget)) {
+            return false;
+        }
+        String haystack = normalize(widgetText(widget) + " " + widget.getName() + " " + widget.getActions());
+        return haystack.contains("teleport");
+    }
+
+    private boolean clickTeleportControl(APIContext ctx, WidgetChild widget) {
+        if (widget == null || !widget.isValid()) {
+            return false;
+        }
+        if (widget.interact("Teleport")) {
+            return true;
+        }
+        String text = widgetText(widget);
+        if (!text.isBlank() && widget.interact("Teleport", text)) {
+            return true;
+        }
+        return ctx.mouse().click(widget, false) || widget.click(false) || widget.click();
     }
 
     private WidgetChild getNestedWidget(APIContext ctx, int group, int... childIndexes) {
