@@ -8,6 +8,7 @@ import com.epicbot.api.shared.util.time.Time;
 import org.gusta.mixology.config.MixologySettings;
 import org.gusta.mixology.stats.MixologyStats;
 
+import java.awt.Point;
 import java.awt.Rectangle;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -26,10 +27,8 @@ public class MinigameTeleportService {
     private static final int MIXOLOGY_CARD_GROUP = 951;
     private static final int MIXOLOGY_CARD_LIST_CHILD = 4;
     private static final int MIXOLOGY_CARD_CHILD = 14;
-    private static final int MIXOLOGY_SCROLL_CONTAINER_CHILD = 26;
-    private static final int MIXOLOGY_SCROLL_DOWN_CHILD = 5;
-    private static final int MIXOLOGY_CARD_SCROLL_LOG_WINDOW = 20;
-    private static final int MIXOLOGY_CARD_MIN_SCROLLS_BEFORE_SELECT = 8;
+    private static final int MIXOLOGY_CARD_SCROLL_LOG_WINDOW = 30;
+    private static final int MOUSE_SCROLL_BATCH = 3;
 
     private final MixologySettings settings;
     private final MixologyStats stats;
@@ -161,10 +160,6 @@ public class MinigameTeleportService {
         WidgetChild mixologyCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
         if (mixologyCard != null && mixologyCard.isValid()) {
             if (isMasteringMixologyCardReadyForClick(mixologyCard)) {
-                if (mixologyCardScrollAttempts < MIXOLOGY_CARD_MIN_SCROLLS_BEFORE_SELECT
-                        && clickScrollDownSearchingMixology(ctx, mixologyCard, true)) {
-                    return false;
-                }
                 stats.setStatus("Selecting Mastering Mixology (widget 951.14)");
                 if (clickWidget(ctx, mixologyCard, "Select")) {
                     Time.sleep(600, 900, () -> findPanelTeleportControl(ctx) != null, 100);
@@ -173,7 +168,7 @@ public class MinigameTeleportService {
                         return true;
                     }
                     stats.debug("Mastering Mixology card clicked, but final teleport button is not visible yet; continuing scroll search");
-                    clickScrollDownSearchingMixology(ctx, mixologyCard, true);
+                    mouseWheelSearchingMixology(ctx, true);
                     Time.sleep(350, 650);
                     return false;
                 }
@@ -182,7 +177,7 @@ public class MinigameTeleportService {
                 return false;
             }
 
-            if (clickScrollDownSearchingMixology(ctx, mixologyCard, false)) {
+            if (mouseWheelSearchingMixology(ctx, false)) {
                 return false;
             }
         }
@@ -197,7 +192,7 @@ public class MinigameTeleportService {
                     return true;
                 }
                 stats.debug("Mastering Mixology text clicked, but final teleport button is not visible yet; continuing scroll search");
-                clickScrollDownSearchingMixology(ctx, mixologyCard, true);
+                mouseWheelSearchingMixology(ctx, true);
                 return false;
             }
             stats.debug("Mastering Mixology text is visible, but no clickable text widget accepted the click");
@@ -218,7 +213,7 @@ public class MinigameTeleportService {
         }
 
         if (isMinigameTeleportPanelOpen(ctx)) {
-            if (clickScrollDownSearchingMixology(ctx, mixologyCard, false)) {
+            if (mouseWheelSearchingMixology(ctx, false)) {
                 return false;
             }
             stats.setStatus("Mastering Mixology not visible yet; keeping minigame teleport search active");
@@ -232,35 +227,108 @@ public class MinigameTeleportService {
         return false;
     }
 
-    private boolean clickScrollDownSearchingMixology(APIContext ctx, WidgetChild mixologyCard, boolean force) {
+    private boolean mouseWheelSearchingMixology(APIContext ctx, boolean force) {
+        WidgetChild mixologyCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
         if (!force && isMasteringMixologyCardReadyForClick(mixologyCard)) {
             return false;
         }
 
-        WidgetChild scrollDown = getNestedWidget(
-                ctx,
-                MIXOLOGY_CARD_GROUP,
-                MIXOLOGY_SCROLL_CONTAINER_CHILD,
-                MIXOLOGY_SCROLL_DOWN_CHILD
-        );
-        if (scrollDown == null || !scrollDown.isValid()) {
+        if (!moveMouseToTeleportList(ctx)) {
+            stats.debug("Minigame teleport list area unavailable for mouse-wheel search");
             return false;
         }
 
         int displayAttempt = (mixologyCardScrollAttempts % MIXOLOGY_CARD_SCROLL_LOG_WINDOW) + 1;
-        stats.setStatus("Clicking minigame list scroll button 951.26.5 for Mastering Mixology "
+        stats.setStatus("Mouse-wheel scrolling minigame list for Mastering Mixology "
                 + displayAttempt + "/" + MIXOLOGY_CARD_SCROLL_LOG_WINDOW);
+
         Rectangle beforeBounds = safeBounds(mixologyCard);
-        boolean clicked = clickWidget(ctx, scrollDown, "Scroll", "Select");
-        if (!clicked) {
-            stats.debug("Minigame teleport scroll widget rejected click; not counting this attempt");
-            Time.sleep(450, 700);
+        String beforeFingerprint = visibleTeleportListFingerprint(ctx);
+        boolean downMoved = scrollAndWaitForListChange(ctx, false, beforeBounds, beforeFingerprint);
+        if (!downMoved) {
+            Rectangle retryBounds = safeBounds(ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD));
+            String retryFingerprint = visibleTeleportListFingerprint(ctx);
+            downMoved = scrollAndWaitForListChange(ctx, true, retryBounds, retryFingerprint);
+        }
+
+        if (!downMoved) {
+            stats.debug("Mouse-wheel scroll did not visibly move the minigame list; not counting this attempt");
+            Time.sleep(500, 800);
             return false;
         }
 
-        Time.sleep(650, 950, () -> hasScrollMovedOrCardReady(ctx, beforeBounds), 100);
         mixologyCardScrollAttempts++;
         return true;
+    }
+
+    private boolean scrollAndWaitForListChange(
+            APIContext ctx,
+            boolean direction,
+            Rectangle beforeBounds,
+            String beforeFingerprint
+    ) {
+        ctx.mouse().scroll(direction, MOUSE_SCROLL_BATCH);
+        return Time.sleep(700, 1100,
+                () -> hasScrollMovedOrCardReady(ctx, beforeBounds)
+                        || !visibleTeleportListFingerprint(ctx).equals(beforeFingerprint),
+                100);
+    }
+
+    private boolean moveMouseToTeleportList(APIContext ctx) {
+        WidgetChild list = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_LIST_CHILD);
+        Rectangle bounds = safeBounds(list);
+        if (bounds != null && bounds.width > 0 && bounds.height > 0) {
+            int x = clamp(bounds.x + Math.min(bounds.width - 20, Math.max(20, bounds.width / 2)), 650, 1230);
+            int y = clamp(bounds.y + Math.min(bounds.height - 35, Math.max(35, bounds.height / 2)), 260, 760);
+            return ctx.mouse().move(new Point(x, y));
+        }
+
+        WidgetChild card = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
+        bounds = safeBounds(card);
+        if (bounds != null && bounds.width > 0 && bounds.height > 0) {
+            int x = clamp(bounds.x + bounds.width / 2, 650, 1230);
+            int y = clamp(bounds.y + bounds.height / 2, 260, 760);
+            return ctx.mouse().move(new Point(x, y));
+        }
+
+        return ctx.mouse().move(new Point(930, 520));
+    }
+
+    private String visibleTeleportListFingerprint(APIContext ctx) {
+        StringBuilder fingerprint = new StringBuilder();
+        for (WidgetChild widget : widgetSnapshot(ctx, widget -> {
+            if (widget == null || !widget.isValid()) {
+                return false;
+            }
+            Rectangle bounds = safeBounds(widget);
+            return bounds != null
+                    && bounds.width > 0
+                    && bounds.height > 0
+                    && bounds.x >= 550
+                    && bounds.x <= 1250
+                    && bounds.y >= 220
+                    && bounds.y <= 820;
+        })) {
+            Rectangle bounds = safeBounds(widget);
+            String text = normalize(widgetText(widget));
+            if (bounds != null && (!text.isBlank() || widget.getMaterialId() > 0)) {
+                fingerprint.append('|')
+                        .append(widget.getIndex())
+                        .append('@')
+                        .append(bounds.x)
+                        .append(',')
+                        .append(bounds.y)
+                        .append(':')
+                        .append(widget.getMaterialId())
+                        .append(':')
+                        .append(text);
+            }
+        }
+        return fingerprint.toString();
+    }
+
+    private int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     private boolean isMasteringMixologyCardReadyForClick(WidgetChild mixologyCard) {
