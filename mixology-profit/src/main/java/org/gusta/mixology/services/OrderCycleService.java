@@ -45,7 +45,8 @@ public class OrderCycleService {
             return false;
         }
 
-        syncActiveOrderBatch(orders);
+        orders = selectWorkingBatch(ctx, orders);
+        pruneTrackedReadyOrdersToInventory(ctx, orders);
 
         if (pendingFinalizerOrder != null) {
             stats.setStatus("Resuming pending finalizer: " + pendingFinalizerOrder.label());
@@ -69,7 +70,7 @@ public class OrderCycleService {
                     + trackedOrderText());
             if (hasTrackedRequiredOrders(orders) && hasRequiredPotions(ctx, orders)) {
                 stats.setStatus("Tracked batch already has 3 confirmed order potions; delivering batch");
-                return conveyor.depositOrders(ctx, orders);
+                return deliverTrackedBatch(ctx, orders);
             }
         }
 
@@ -139,18 +140,12 @@ public class OrderCycleService {
                 + " tracked=" + trackedOrderText()
                 + " details=" + potionInventory.allPotionDetails(ctx));
         stats.setStatus("Depositing " + Math.min(orders.size(), readyAfter) + " order potions together");
-        boolean delivered = conveyor.depositOrders(ctx, orders);
-        if (delivered) {
-            trackedReadyOrders.clear();
-        } else {
-            stats.debug("Conveyor delivery failed/partial; clearing tracked batch for safe rebuild");
-            trackedReadyOrders.clear();
-        }
-        return delivered;
+        return deliverTrackedBatch(ctx, orders);
     }
 
     public boolean hasTrackedRequiredOrdersForCurrentBatch(List<PotionOrder> orders) {
-        return sameOrderBatch(activeOrderBatch, orders) && hasTrackedRequiredOrders(orders);
+        List<PotionOrder> batch = activeOrderBatch.isEmpty() ? orders : activeOrderBatch;
+        return hasTrackedRequiredOrders(batch);
     }
 
     public List<PotionOrder> remainingOrdersForCurrentBatch(List<PotionOrder> orders) {
@@ -159,10 +154,9 @@ public class OrderCycleService {
             return remaining;
         }
 
-        Map<String, Integer> tracked = sameOrderBatch(activeOrderBatch, orders)
-                ? orderKeyCounts(trackedReadyOrders)
-                : new HashMap<>();
-        for (PotionOrder order : orders) {
+        List<PotionOrder> batch = activeOrderBatch.isEmpty() ? orders : activeOrderBatch;
+        Map<String, Integer> tracked = orderKeyCounts(trackedReadyOrders);
+        for (PotionOrder order : batch) {
             if (order == null || !order.isComplete()) {
                 continue;
             }
@@ -287,21 +281,92 @@ public class OrderCycleService {
         return !required.isEmpty();
     }
 
-    private void syncActiveOrderBatch(List<PotionOrder> orders) {
-        if (sameOrderBatch(activeOrderBatch, orders)) {
-            return;
+    private boolean deliverTrackedBatch(APIContext ctx, List<PotionOrder> orders) {
+        boolean delivered = conveyor.depositOrders(ctx, orders);
+        if (delivered) {
+            trackedReadyOrders.clear();
+            activeOrderBatch = new ArrayList<>();
+            pendingFinalizerOrder = null;
+            return true;
         }
+
+        pruneTrackedReadyOrdersToInventory(ctx, orders);
+        stats.debug("Conveyor delivery failed/partial; keeping active batch for retry. active="
+                + orderBatchText(activeOrderBatch)
+                + " tracked="
+                + trackedOrderText()
+                + " inventory="
+                + potionInventory.readyPotionDetails(ctx));
+        return false;
+    }
+
+    private List<PotionOrder> selectWorkingBatch(APIContext ctx, List<PotionOrder> visibleOrders) {
+        if (sameOrderBatch(activeOrderBatch, visibleOrders)) {
+            return copyOrders(activeOrderBatch);
+        }
+
+        boolean hasProgress = pendingFinalizerOrder != null
+                || !trackedReadyOrders.isEmpty()
+                || potionInventory.anyPotionCount(ctx) > 0;
+        if (!activeOrderBatch.isEmpty() && hasProgress) {
+            stats.debug("HUD order batch changed while active batch is in progress; keeping locked batch. active="
+                    + orderBatchText(activeOrderBatch)
+                    + " visible="
+                    + orderBatchText(visibleOrders)
+                    + " tracked="
+                    + trackedOrderText()
+                    + " inventory="
+                    + potionInventory.allPotionDetails(ctx));
+            return copyOrders(activeOrderBatch);
+        }
+
         if (!activeOrderBatch.isEmpty() || !trackedReadyOrders.isEmpty() || pendingFinalizerOrder != null) {
-            stats.debug("Order batch changed; clearing tracked ready state. old="
+            stats.debug("Replacing idle tracked order batch. old="
                     + orderBatchText(activeOrderBatch)
                     + " new="
-                    + orderBatchText(orders)
+                    + orderBatchText(visibleOrders)
                     + " tracked="
                     + trackedOrderText());
         }
-        activeOrderBatch = copyOrders(orders);
+        activeOrderBatch = copyOrders(visibleOrders);
         trackedReadyOrders.clear();
         pendingFinalizerOrder = null;
+        return copyOrders(activeOrderBatch);
+    }
+
+    private void pruneTrackedReadyOrdersToInventory(APIContext ctx, List<PotionOrder> orders) {
+        if (trackedReadyOrders.isEmpty()) {
+            return;
+        }
+
+        Map<PotionRecipe, Integer> ready = potionInventory.readyPotionCounts(ctx);
+        List<PotionOrder> pruned = new ArrayList<>();
+        for (PotionOrder order : trackedReadyOrders) {
+            if (order == null || order.recipe() == null) {
+                continue;
+            }
+
+            int available = ready.getOrDefault(order.recipe(), 0);
+            if (available <= 0) {
+                continue;
+            }
+
+            pruned.add(copyOrder(order));
+            ready.put(order.recipe(), available - 1);
+        }
+
+        if (pruned.size() != trackedReadyOrders.size()) {
+            stats.debug("Pruned tracked ready orders to match carried inventory. before="
+                    + trackedOrderText()
+                    + " after="
+                    + orderBatchText(pruned)
+                    + " required="
+                    + requiredText(requiredCounts(orders))
+                    + " inventory="
+                    + potionInventory.readyPotionDetails(ctx));
+            trackedReadyOrders.clear();
+            trackedReadyOrders.addAll(pruned);
+        }
     }
 
     private void recordTrackedReadyOrder(PotionOrder order) {
