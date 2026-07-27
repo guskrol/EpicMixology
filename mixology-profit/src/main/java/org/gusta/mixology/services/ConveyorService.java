@@ -225,12 +225,9 @@ public class ConveyorService {
                 || CONVEYOR_BELT_APPROACH_TILE.interact("Walk here")
                 || CONVEYOR_BELT_APPROACH_TILE.click(true));
         if (!walking) {
-            walking = ctx.walking().walkTo(CONVEYOR_BELT_APPROACH_TILE)
-                || ctx.walking().walkOnMap(CONVEYOR_BELT_APPROACH_TILE);
-        }
-        if (!walking) {
-            ctx.webWalking().setUseTeleports(false);
-            ctx.webWalking().walkTo(CONVEYOR_BELT_APPROACH_TILE);
+            stats.setStatus("Local ground click failed for conveyor delivery tile");
+            Time.sleep(350, 650);
+            return false;
         }
         Time.sleep(900, 1500,
                 () -> ctx.localPlayer().isMoving()

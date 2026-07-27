@@ -160,13 +160,23 @@ public class ObjectService {
         }
 
         if (approachTile != null && approachTile.tileDistanceTo(ctx) > 1) {
-            stats.setStatus("Walking to " + label + " tile " + tileText(approachTile)
+            stats.setStatus("Ground-clicking " + label + " tile " + tileText(approachTile)
                     + " dist=" + approachTile.tileDistanceTo(ctx));
-            boolean walking = ctx.walking().walkTo(approachTile)
-                    || ctx.walking().walkOnMap(approachTile);
+            boolean walking = ctx.walking().walkOnScreen(approachTile)
+                    || approachTile.interact("Walk here")
+                    || approachTile.click(true);
             if (!walking) {
-                ctx.webWalking().setUseTeleports(false);
-                ctx.webWalking().walkTo(approachTile);
+                if (area != null && area.contains(ctx.localPlayer().getLocation())) {
+                    stats.setStatus("Local ground click failed for " + label
+                            + " tile " + tileText(approachTile));
+                    Time.sleep(350, 650);
+                    return false;
+                }
+                walking = ctx.walking().walkTo(approachTile);
+                if (!walking) {
+                    ctx.webWalking().setUseTeleports(false);
+                    ctx.webWalking().walkTo(approachTile);
+                }
             }
             Time.sleep(800, 1300,
                     () -> ctx.localPlayer().isMoving() || approachTile.tileDistanceTo(ctx) <= 1,

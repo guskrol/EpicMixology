@@ -175,14 +175,14 @@ public class TravelService {
         }
 
         if (isInSocietyLabContext(ctx)) {
-            stats.setStatus("Walking to Mixology order reading tile "
+            stats.setStatus("Ground-clicking Mixology order reading tile "
                     + tileText(settings.mixingRoomCenterTile())
                     + " dist=" + settings.mixingRoomCenterTile().tileDistanceTo(ctx));
-            boolean walking = ctx.walking().walkTo(settings.mixingRoomCenterTile())
-                    || ctx.walking().walkOnMap(settings.mixingRoomCenterTile());
+            boolean walking = localGroundWalk(ctx, settings.mixingRoomCenterTile());
             if (!walking) {
-                ctx.webWalking().walkTo(settings.mixingRoomCenterTile());
-                walking = true;
+                stats.setStatus("Local ground click failed for Mixology order reading tile");
+                Time.sleep(350, 650);
+                return false;
             }
             Time.sleep(900, 1500,
                     () -> isAtOrderReadingTile(ctx) || ctx.localPlayer().isMoving(), 100);
@@ -214,7 +214,7 @@ public class TravelService {
 
     public boolean moveToMixingRoomCenter(APIContext ctx, String reason) {
         if (isAtLeverCenterTile(ctx)) {
-            stats.setStatus(reason + ": already in lever work zone");
+            stats.setStatus(reason + ": already on lever work tile");
             return true;
         }
 
@@ -239,12 +239,11 @@ public class TravelService {
         Tile[] fallbackTiles = settings.leverReturnTiles();
         for (int i = 0; i < fallbackTiles.length; i++) {
             Tile target = fallbackTiles[i];
-            stats.setStatus(reason + ": walking to lever fallback "
+            stats.setStatus(reason + ": ground-clicking lever work tile "
                     + (i + 1) + "/" + fallbackTiles.length
                     + " " + tileText(target)
                     + " dist=" + target.tileDistanceTo(ctx));
-            boolean walking = ctx.walking().walkTo(target)
-                    || ctx.walking().walkOnMap(target);
+            boolean walking = localGroundWalk(ctx, target);
             Time.sleep(900, 1500,
                     () -> isAtLeverCenterTile(ctx) || ctx.localPlayer().isMoving(), 100);
             if (isAtLeverCenterTile(ctx)) {
@@ -256,7 +255,12 @@ public class TravelService {
         }
 
         Tile finalFallback = fallbackTiles[fallbackTiles.length - 1];
-        stats.setStatus(reason + ": webwalking to lever fallback " + tileText(finalFallback));
+        if (settings.isMixingRoomTile(ctx.localPlayer().getLocation())) {
+            stats.setStatus(reason + ": local lever ground-click retries failed");
+            Time.sleep(350, 650);
+            return false;
+        }
+        stats.setStatus(reason + ": webwalking to lever fallback after ground-click retries " + tileText(finalFallback));
         ctx.webWalking().setUseTeleports(false);
         ctx.webWalking().walkTo(finalFallback);
         Time.sleep(900, 1500,
@@ -269,15 +273,30 @@ public class TravelService {
     }
 
     private boolean isAtLeverCenterTile(APIContext ctx) {
-        if (!settings.isMixingRoomTile(ctx.localPlayer().getLocation())) {
+        Tile playerTile = ctx.localPlayer().getLocation();
+        if (!settings.isMixingRoomTile(playerTile)) {
             return false;
         }
         for (Tile tile : settings.leverReturnTiles()) {
-            if (tile.tileDistanceTo(ctx) <= 1) {
+            if (isSameTile(playerTile, tile)) {
                 return true;
             }
         }
         return false;
+    }
+
+    private boolean localGroundWalk(APIContext ctx, Tile target) {
+        return ctx.walking().walkOnScreen(target)
+                || target.interact("Walk here")
+                || target.click(true);
+    }
+
+    private boolean isSameTile(Tile left, Tile right) {
+        return left != null
+                && right != null
+                && left.getX() == right.getX()
+                && left.getY() == right.getY()
+                && left.getPlane() == right.getPlane();
     }
 
     private Tile nearestLeverReturnTile(APIContext ctx) {
