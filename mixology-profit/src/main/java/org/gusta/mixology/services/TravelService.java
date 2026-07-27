@@ -256,9 +256,12 @@ public class TravelService {
 
         Tile finalFallback = fallbackTiles[fallbackTiles.length - 1];
         if (settings.isMixingRoomTile(ctx.localPlayer().getLocation())) {
-            stats.setStatus(reason + ": local lever ground-click retries failed");
-            Time.sleep(350, 650);
-            return false;
+            stats.setStatus(reason + ": ground-click retries failed; minimap walking to lever fallback "
+                    + tileText(finalFallback));
+            ctx.walking().walkTo(finalFallback);
+            Time.sleep(900, 1500,
+                    () -> isAtLeverCenterTile(ctx) || ctx.localPlayer().isMoving(), 100);
+            return isAtLeverCenterTile(ctx);
         }
         stats.setStatus(reason + ": webwalking to lever fallback after ground-click retries " + tileText(finalFallback));
         ctx.webWalking().setUseTeleports(false);
