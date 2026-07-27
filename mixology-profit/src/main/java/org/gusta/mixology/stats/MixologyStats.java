@@ -16,7 +16,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 public class MixologyStats {
-    private static final long SAME_STATUS_LOG_INTERVAL_MILLIS = 5_000L;
+    private static final boolean VERBOSE_LOGGING = false;
+    private static final long SAME_STATUS_LOG_INTERVAL_MILLIS = 30_000L;
 
     private final long startedAt = System.currentTimeMillis();
     private final Consumer<String> logger;
@@ -323,9 +324,96 @@ public class MixologyStats {
     }
 
     private void log(String message) {
-        if (logger != null) {
+        if (logger != null && shouldEmitLog(message)) {
             logger.accept(message);
         }
+    }
+
+    private boolean shouldEmitLog(String message) {
+        if (VERBOSE_LOGGING) {
+            return true;
+        }
+        if (message == null || message.isBlank()) {
+            return false;
+        }
+
+        String normalized = message.toLowerCase(Locale.ROOT);
+
+        if (containsAny(normalized,
+                "state transition",
+                "error",
+                "failed",
+                "blocked",
+                "missing",
+                "invalid",
+                "corrupt",
+                "retry",
+                "watchdog",
+                "logout",
+                "stopped",
+                "started")) {
+            return true;
+        }
+
+        if (containsAny(normalized,
+                "restock",
+                "grand exchange",
+                "ge ",
+                "buying",
+                "offer",
+                "collecting ge",
+                "price warning",
+                "bank check ok",
+                "bank has no",
+                "banking carried",
+                "no banked")) {
+            return true;
+        }
+
+        if (containsAny(normalized,
+                "hopper low",
+                "hopper already capped",
+                "hopper has no space",
+                "live hopper stock confirmed",
+                "final hopper load",
+                "no stored paste",
+                "not enough paste",
+                "not enough resin")) {
+            return true;
+        }
+
+        if (containsAny(normalized,
+                "read 3 complete mixology order",
+                "delivering",
+                "depositing 3",
+                "conveyor accepted",
+                "rewarded",
+                "orders completed",
+                "order cycle paused")) {
+            return true;
+        }
+
+        if (containsAny(normalized,
+                "minigame teleport",
+                "charter",
+                "members world",
+                "f2p world",
+                "travel loadout ready",
+                "requirements look ok",
+                "requires 60 herblore")) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private boolean containsAny(String value, String... needles) {
+        for (String needle : needles) {
+            if (value.contains(needle)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String locationText(APIContext ctx) {
