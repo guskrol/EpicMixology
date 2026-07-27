@@ -207,8 +207,16 @@ public class ObjectService {
             if (!walking) {
                 if (area != null && area.contains(ctx.localPlayer().getLocation())) {
                     stats.setStatus("Local ground click failed for " + label
-                            + " tile " + tileText(approachTile));
-                    Time.sleep(350, 650);
+                            + " tile " + tileText(approachTile)
+                            + "; minimap fallback");
+                    walking = ctx.walking().walkTo(approachTile);
+                    if (!walking) {
+                        ctx.webWalking().setUseTeleports(false);
+                        ctx.webWalking().walkTo(approachTile);
+                    }
+                    Time.sleep(800, 1300,
+                            () -> ctx.localPlayer().isMoving() || approachTile.tileDistanceTo(ctx) <= 1,
+                            100);
                     return false;
                 }
                 walking = ctx.walking().walkTo(approachTile);

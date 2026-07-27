@@ -180,9 +180,12 @@ public class TravelService {
                     + " dist=" + settings.mixingRoomCenterTile().tileDistanceTo(ctx));
             boolean walking = localGroundWalk(ctx, settings.mixingRoomCenterTile());
             if (!walking) {
-                stats.setStatus("Local ground click failed for Mixology order reading tile");
-                Time.sleep(350, 650);
-                return false;
+                stats.setStatus("Local ground click failed for Mixology order reading tile; minimap fallback "
+                        + tileText(settings.mixingRoomCenterTile()));
+                ctx.walking().walkTo(settings.mixingRoomCenterTile());
+                Time.sleep(900, 1500,
+                        () -> isAtOrderReadingTile(ctx) || ctx.localPlayer().isMoving(), 100);
+                return isAtOrderReadingTile(ctx);
             }
             Time.sleep(900, 1500,
                     () -> isAtOrderReadingTile(ctx) || ctx.localPlayer().isMoving(), 100);

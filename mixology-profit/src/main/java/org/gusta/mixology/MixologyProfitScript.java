@@ -40,7 +40,7 @@ import java.util.List;
 
 @ScriptManifest(name = "Mixology Profit", gameType = GameType.OS)
 public class MixologyProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.12-return-lever-minimap";
+    private static final String SCRIPT_VERSION = "v0.2.14-all-lab-minimap-fallback";
 
     private MixologyStats stats;
     private MixologyPaint paint;

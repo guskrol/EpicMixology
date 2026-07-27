@@ -225,9 +225,14 @@ public class ConveyorService {
                 || CONVEYOR_BELT_APPROACH_TILE.interact("Walk here")
                 || CONVEYOR_BELT_APPROACH_TILE.click(true));
         if (!walking) {
-            stats.setStatus("Local ground click failed for conveyor delivery tile");
-            Time.sleep(350, 650);
-            return false;
+            stats.setStatus("Local ground click failed for conveyor delivery tile; minimap fallback "
+                    + tileText(CONVEYOR_BELT_APPROACH_TILE));
+            ctx.walking().walkTo(CONVEYOR_BELT_APPROACH_TILE);
+            Time.sleep(900, 1500,
+                    () -> ctx.localPlayer().isMoving()
+                            || CONVEYOR_BELT_APPROACH_TILE.tileDistanceTo(ctx) <= DELIVERY_TILE_READY_DISTANCE,
+                    100);
+            return CONVEYOR_BELT_APPROACH_TILE.tileDistanceTo(ctx) <= DELIVERY_TILE_READY_DISTANCE;
         }
         Time.sleep(900, 1500,
                 () -> ctx.localPlayer().isMoving()
