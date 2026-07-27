@@ -3,6 +3,7 @@ package org.gusta.mixology.services;
 import com.epicbot.api.gameval.InterfaceID;
 import com.epicbot.api.shared.APIContext;
 import com.epicbot.api.shared.entity.WidgetChild;
+import com.epicbot.api.shared.entity.WidgetGroup;
 import com.epicbot.api.shared.methods.ITabsAPI;
 import com.epicbot.api.shared.util.time.Time;
 import org.gusta.mixology.config.MixologySettings;
@@ -20,6 +21,7 @@ import java.util.function.Predicate;
 public class MinigameTeleportService {
     private static final long QUICK_RETRY_MILLIS = 20_000L;
     private static final long COOLDOWN_RETRY_MILLIS = 5 * 60_000L;
+    private static final long PANEL_OPEN_GRACE_MILLIS = 8_000L;
     private static final int MAGIC_TAB_GROUP = 164;
     private static final int MAGIC_TAB_CHILD = 58;
     private static final int MINIGAME_TELEPORT_SPELL_GROUP = 218;
@@ -33,6 +35,7 @@ public class MinigameTeleportService {
     private final MixologySettings settings;
     private final MixologyStats stats;
     private long nextAttemptAt;
+    private long panelRequestedAt;
     private boolean magicTabSelected;
     private int mixologyCardScrollAttempts;
     private boolean mixologyCardSelected;
@@ -62,7 +65,7 @@ public class MinigameTeleportService {
         if (mixologyCardSelected) {
             return clickTeleport(ctx);
         }
-        if (isMinigameTeleportPanelOpen(ctx)) {
+        if (isMinigameTeleportPanelOpen(ctx) || isPanelOpenGraceActive()) {
             if (!selectMasteringMixology(ctx)) {
                 return true;
             }
@@ -123,6 +126,7 @@ public class MinigameTeleportService {
         if (isMinigameTeleportPanelOpen(ctx)) {
             stats.setStatus("Mastering Mixology teleport panel opened");
             magicTabSelected = false;
+            panelRequestedAt = 0L;
             mixologyCardScrollAttempts = 0;
             mixologyCardSelected = false;
             return true;
@@ -133,6 +137,7 @@ public class MinigameTeleportService {
         }
         stats.debug("Minigame Teleport widget 218.7 clicked; waiting for Mastering Mixology card 951.14");
         magicTabSelected = false;
+        panelRequestedAt = System.currentTimeMillis();
         return true;
     }
 
@@ -157,27 +162,31 @@ public class MinigameTeleportService {
     }
 
     private boolean selectMasteringMixology(APIContext ctx) {
-        WidgetChild visibleMixologyCard = findVisibleMasteringMixologyCard(ctx);
-        if (visibleMixologyCard != null) {
-                stats.setStatus("Selecting Mastering Mixology (visible card)");
-                if (selectTeleportCard(ctx, visibleMixologyCard)) {
-                    Time.sleep(600, 900, () -> findPanelTeleportControl(ctx) != null, 100);
-                    if (findPanelTeleportControl(ctx) != null) {
-                        mixologyCardScrollAttempts = 0;
-                        return true;
-                    }
-                    stats.debug("Mastering Mixology card clicked, but final teleport button is not visible yet; continuing scroll search");
-                    mixologyCardSelected = false;
-                    mouseWheelSearchingMixology(ctx, true);
-                    Time.sleep(350, 650);
-                    return false;
-                }
-                stats.debug("Visible Mastering Mixology card rejected click after scroll attempts="
-                        + mixologyCardScrollAttempts + " bounds=" + safeBounds(visibleMixologyCard));
-                return false;
+        WidgetChild mixologyCard = findMasteringMixologyCard(ctx);
+        if (mixologyCard != null && !isMasteringMixologyCardReadyForClick(ctx, mixologyCard)) {
+            scrollMasteringMixologyIntoView(ctx, mixologyCard);
         }
 
-        WidgetChild mixologyCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
+        WidgetChild visibleMixologyCard = findVisibleMasteringMixologyCard(ctx);
+        if (visibleMixologyCard != null) {
+            stats.setStatus("Selecting Mastering Mixology (visible card)");
+            if (selectTeleportCard(ctx, visibleMixologyCard)) {
+                Time.sleep(600, 900, () -> findPanelTeleportControl(ctx) != null, 100);
+                if (findPanelTeleportControl(ctx) != null) {
+                    mixologyCardScrollAttempts = 0;
+                    return true;
+                }
+                stats.debug("Mastering Mixology card clicked, but final teleport button is not visible yet; continuing scroll search");
+                mixologyCardSelected = false;
+                mouseWheelSearchingMixology(ctx, true);
+                Time.sleep(350, 650);
+                return false;
+            }
+            stats.debug("Visible Mastering Mixology card rejected click after scroll attempts="
+                    + mixologyCardScrollAttempts + " bounds=" + safeBounds(visibleMixologyCard));
+            return false;
+        }
+
         if (mixologyCard != null && mixologyCard.isValid()) {
             if (mouseWheelSearchingMixology(ctx, false)) {
                 return false;
@@ -200,7 +209,7 @@ public class MinigameTeleportService {
             stats.debug("Mastering Mixology text is visible, but no clickable text widget accepted the click");
         }
 
-        WidgetChild dropdown = ctx.widgets().get(InterfaceID.GROUPING, InterfaceID.Grouping.DROPDOWN);
+        WidgetChild dropdown = ctx.widgets().getChild(InterfaceID.Grouping.DROPDOWN);
         if (dropdown != null && dropdown.isValid() && click(ctx, dropdown)) {
             stats.setStatus("Opening minigame teleport dropdown");
             Time.sleep(500, 900);
@@ -214,7 +223,7 @@ public class MinigameTeleportService {
             return false;
         }
 
-        if (isMinigameTeleportPanelOpen(ctx)) {
+        if (isMinigameTeleportPanelOpen(ctx) || isPanelOpenGraceActive()) {
             if (mouseWheelSearchingMixology(ctx, false)) {
                 return false;
             }
@@ -230,8 +239,8 @@ public class MinigameTeleportService {
     }
 
     private boolean mouseWheelSearchingMixology(APIContext ctx, boolean force) {
-        WidgetChild mixologyCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
-        if (!force && isMasteringMixologyCardReadyForClick(mixologyCard)) {
+        WidgetChild mixologyCard = findMasteringMixologyCard(ctx);
+        if (!force && isMasteringMixologyCardReadyForClick(ctx, mixologyCard)) {
             return false;
         }
 
@@ -333,17 +342,54 @@ public class MinigameTeleportService {
         return Math.max(min, Math.min(max, value));
     }
 
-    private boolean isMasteringMixologyCardReadyForClick(WidgetChild mixologyCard) {
+    private boolean isMasteringMixologyCardReadyForClick(APIContext ctx, WidgetChild mixologyCard) {
         return mixologyCard != null
                 && mixologyCard.isValid()
                 && isWidgetInClickableArea(mixologyCard)
-                && isWidgetInTeleportListClickZone(mixologyCard)
+                && isWidgetInTeleportListClickZone(ctx, mixologyCard)
                 && normalize(widgetTreeText(mixologyCard)).contains("mastering mixology");
+    }
+
+    private WidgetChild findMasteringMixologyCard(APIContext ctx) {
+        WidgetChild fixedCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
+        if (fixedCard != null && fixedCard.isValid()
+                && normalize(widgetTreeText(fixedCard)).contains("mastering mixology")) {
+            return fixedCard;
+        }
+
+        List<WidgetChild> widgets = widgetSnapshot(ctx, widget -> widget != null
+                && widget.isValid()
+                && normalize(widgetText(widget)).contains("mastering mixology"));
+        return widgets.isEmpty() ? null : widgets.get(0);
+    }
+
+    private boolean scrollMasteringMixologyIntoView(APIContext ctx, WidgetChild mixologyCard) {
+        WidgetChild list = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_LIST_CHILD);
+        if (list == null || !list.isValid()) {
+            list = ctx.widgets().getChild(InterfaceID.Grouping.DROPDOWN_SCROLLBAR);
+        }
+        if (list == null || !list.isValid()) {
+            return false;
+        }
+
+        Rectangle beforeBounds = safeBounds(mixologyCard);
+        stats.setStatus("Scrolling minigame list to Mastering Mixology");
+        boolean scrolled = ctx.widgets().scroll(mixologyCard, list);
+        if (!scrolled) {
+            stats.debug("Widget API could not scroll Mastering Mixology into view; using mouse-wheel fallback");
+            return false;
+        }
+
+        Time.sleep(600, 1000,
+                () -> isMasteringMixologyCardReadyForClick(ctx, mixologyCard)
+                        || boundsChanged(beforeBounds, safeBounds(mixologyCard)),
+                100);
+        return isMasteringMixologyCardReadyForClick(ctx, mixologyCard);
     }
 
     private WidgetChild findVisibleMasteringMixologyCard(APIContext ctx) {
         WidgetChild fixedCard = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
-        if (isMasteringMixologyCardReadyForClick(fixedCard)) {
+        if (isMasteringMixologyCardReadyForClick(ctx, fixedCard)) {
             return fixedCard;
         }
 
@@ -351,25 +397,27 @@ public class MinigameTeleportService {
             if (widget == null || !widget.isValid() || !isWidgetInClickableArea(widget)) {
                 return false;
             }
-            if (!isWidgetInTeleportListClickZone(widget)) {
+            if (!isWidgetInTeleportListClickZone(ctx, widget)) {
                 return false;
             }
-            return normalize(widgetTreeText(widget)).contains("mastering mixology")
-                    || normalize(widgetText(widget)).contains("mastering mixology");
+            return normalize(widgetText(widget)).contains("mastering mixology");
         });
         return widgets.isEmpty() ? null : widgets.get(0);
     }
 
     private boolean hasScrollMovedOrCardReady(APIContext ctx, Rectangle beforeBounds) {
-        WidgetChild card = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_CHILD);
-        if (isMasteringMixologyCardReadyForClick(card)) {
+        WidgetChild card = findMasteringMixologyCard(ctx);
+        if (isMasteringMixologyCardReadyForClick(ctx, card)) {
             return true;
         }
         Rectangle afterBounds = safeBounds(card);
-        if (beforeBounds == null || afterBounds == null) {
-            return false;
-        }
-        return beforeBounds.x != afterBounds.x || beforeBounds.y != afterBounds.y;
+        return boundsChanged(beforeBounds, afterBounds);
+    }
+
+    private boolean boundsChanged(Rectangle beforeBounds, Rectangle afterBounds) {
+        return beforeBounds != null
+                && afterBounds != null
+                && (beforeBounds.x != afterBounds.x || beforeBounds.y != afterBounds.y);
     }
 
     private boolean isMixologyCardVisible(APIContext ctx) {
@@ -378,8 +426,18 @@ public class MinigameTeleportService {
     }
 
     private boolean isMinigameTeleportPanelOpen(APIContext ctx) {
+        WidgetGroup panel = ctx.widgets().get(MIXOLOGY_CARD_GROUP);
         WidgetChild list = ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_LIST_CHILD);
-        return isMixologyCardVisible(ctx) || (list != null && list.isValid()) || hasText(ctx, "mastering mixology");
+        return (panel != null && panel.isValid() && panel.isVisible())
+                || isMixologyCardVisible(ctx)
+                || (list != null && list.isValid())
+                || ctx.quests().isMinigameTeleportActive()
+                || hasText(ctx, "mastering mixology");
+    }
+
+    private boolean isPanelOpenGraceActive() {
+        return panelRequestedAt > 0L
+                && System.currentTimeMillis() - panelRequestedAt <= PANEL_OPEN_GRACE_MILLIS;
     }
 
     private boolean isWidgetInClickableArea(WidgetChild widget) {
@@ -393,16 +451,20 @@ public class MinigameTeleportService {
                 && bounds.y < 1050;
     }
 
-    private boolean isWidgetInTeleportListClickZone(WidgetChild widget) {
+    private boolean isWidgetInTeleportListClickZone(APIContext ctx, WidgetChild widget) {
         Rectangle bounds = safeBounds(widget);
         if (bounds == null) {
             return false;
         }
 
-        // The card can exist in the widget tree while clipped outside the visible scroll list.
-        // Only select it once it is inside the middle list area the player can actually click.
         int centerX = bounds.x + bounds.width / 2;
         int centerY = bounds.y + bounds.height / 2;
+        Rectangle listBounds = safeBounds(ctx.widgets().get(MIXOLOGY_CARD_GROUP, MIXOLOGY_CARD_LIST_CHILD));
+        if (listBounds != null && listBounds.width > 0 && listBounds.height > 0) {
+            return listBounds.contains(centerX, centerY);
+        }
+
+        // Legacy fallback for clients where the new list container is unavailable.
         return centerX >= 720
                 && centerX <= 1200
                 && centerY >= 300
@@ -452,12 +514,13 @@ public class MinigameTeleportService {
         }
         mixologyCardSelected = false;
         mixologyCardScrollAttempts = 0;
+        panelRequestedAt = 0L;
         nextAttemptAt = System.currentTimeMillis() + 5_000L;
         return false;
     }
 
     private WidgetChild findPanelTeleportControl(APIContext ctx) {
-        WidgetChild legacyTeleport = ctx.widgets().get(InterfaceID.GROUPING, InterfaceID.Grouping.TELEPORT);
+        WidgetChild legacyTeleport = ctx.widgets().getChild(InterfaceID.Grouping.TELEPORT);
         if (isLikelyTeleportControl(legacyTeleport)) {
             return legacyTeleport;
         }
@@ -530,6 +593,7 @@ public class MinigameTeleportService {
         }
         mixologyCardSelected = false;
         mixologyCardScrollAttempts = 0;
+        panelRequestedAt = 0L;
     }
 
     private boolean teleportLooksOnCooldown(APIContext ctx) {
@@ -662,7 +726,7 @@ public class MinigameTeleportService {
                 if (widget == null || !widget.isValid() || widget.getWidth() <= 0 || widget.getHeight() <= 0) {
                     return false;
                 }
-                if (!isWidgetInClickableArea(widget) || !isWidgetInTeleportListClickZone(widget)) {
+                if (!isWidgetInClickableArea(widget) || !isWidgetInTeleportListClickZone(ctx, widget)) {
                     return false;
                 }
                 String text = normalize(widgetText(widget));
