@@ -40,7 +40,7 @@ import java.util.List;
 
 @ScriptManifest(name = "Mixology Profit", gameType = GameType.OS)
 public class MixologyProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.09-lean-logs";
+    private static final String SCRIPT_VERSION = "v0.2.10-hopper-minimap";
 
     private MixologyStats stats;
     private MixologyPaint paint;

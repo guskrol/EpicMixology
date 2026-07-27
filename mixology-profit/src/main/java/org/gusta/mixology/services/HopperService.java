@@ -10,7 +10,7 @@ import org.gusta.mixology.stats.MixologyStats;
 public class HopperService {
     private static final int HOPPER_ID = 54903;
     private static final Tile HOPPER_TILE = new Tile(1394, 9322, 0);
-    private static final Tile HOPPER_APPROACH_TILE = new Tile(1394, 9320, 0);
+    private static final Tile HOPPER_APPROACH_TILE = new Tile(1394, 9321, 0);
 
     private final MixologySettings settings;
     private final ObjectService objects;
@@ -36,7 +36,7 @@ public class HopperService {
 
         int beforePaste = totalPaste(ctx);
         stats.setStatus("Loading paste into hopper");
-        boolean interacted = objects.interactByIdAtTile(ctx, settings.alchemicalSocietyArea(),
+        boolean interacted = objects.interactByIdAtTileWithMinimap(ctx, settings.alchemicalSocietyArea(),
                 HOPPER_ID, "Hopper", HOPPER_TILE, HOPPER_APPROACH_TILE, "Deposit");
         if (!interacted) {
             return false;

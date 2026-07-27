@@ -145,6 +145,31 @@ public class ObjectService {
             Tile approachTile,
             String... actions
     ) {
+        return interactByIdAtTile(ctx, area, id, label, objectTile, approachTile, false, actions);
+    }
+
+    public boolean interactByIdAtTileWithMinimap(
+            APIContext ctx,
+            Area area,
+            int id,
+            String label,
+            Tile objectTile,
+            Tile approachTile,
+            String... actions
+    ) {
+        return interactByIdAtTile(ctx, area, id, label, objectTile, approachTile, true, actions);
+    }
+
+    private boolean interactByIdAtTile(
+            APIContext ctx,
+            Area area,
+            int id,
+            String label,
+            Tile objectTile,
+            Tile approachTile,
+            boolean allowMinimapWalk,
+            String... actions
+    ) {
         if (ctx.localPlayer().isMoving() || ctx.localPlayer().isAnimating()) {
             stats.setStatus("Moving to " + label + " tile " + tileText(approachTile));
             Time.sleep(450, 800);
@@ -160,6 +185,20 @@ public class ObjectService {
         }
 
         if (approachTile != null && approachTile.tileDistanceTo(ctx) > 1) {
+            if (allowMinimapWalk) {
+                stats.setStatus("Minimap walking to " + label + " tile " + tileText(approachTile)
+                        + " dist=" + approachTile.tileDistanceTo(ctx));
+                boolean walking = ctx.walking().walkTo(approachTile);
+                if (!walking) {
+                    ctx.webWalking().setUseTeleports(false);
+                    ctx.webWalking().walkTo(approachTile);
+                }
+                Time.sleep(800, 1300,
+                        () -> ctx.localPlayer().isMoving() || approachTile.tileDistanceTo(ctx) <= 1,
+                        100);
+                return false;
+            }
+
             stats.setStatus("Ground-clicking " + label + " tile " + tileText(approachTile)
                     + " dist=" + approachTile.tileDistanceTo(ctx));
             boolean walking = ctx.walking().walkOnScreen(approachTile)
