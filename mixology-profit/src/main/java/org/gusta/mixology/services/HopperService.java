@@ -34,6 +34,10 @@ public class HopperService {
             return false;
         }
 
+        if (!moveToHopperLoadTile(ctx)) {
+            return false;
+        }
+
         int beforePaste = totalPaste(ctx);
         stats.setStatus("Loading paste into hopper");
         boolean interacted = objects.interactByIdAtTileWithMinimap(ctx, settings.alchemicalSocietyArea(),
@@ -44,6 +48,49 @@ public class HopperService {
 
         Time.sleep(1200, 2000, () -> totalPaste(ctx) < beforePaste, 100);
         return totalPaste(ctx) < beforePaste;
+    }
+
+    private boolean moveToHopperLoadTile(APIContext ctx) {
+        if (HOPPER_APPROACH_TILE.tileDistanceTo(ctx) <= 1) {
+            return true;
+        }
+
+        if (ctx.bank().isOpen()) {
+            stats.setStatus("Closing bank before Hopper load tile");
+            ctx.bank().close();
+            Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
+            return false;
+        }
+        if (ctx.grandExchange().isOpen()) {
+            stats.setStatus("Closing GE before Hopper load tile");
+            ctx.grandExchange().close();
+            Time.sleep(500, 900, () -> !ctx.grandExchange().isOpen(), 100);
+            return false;
+        }
+        if (ctx.localPlayer().isMoving() || ctx.localPlayer().isAnimating()) {
+            stats.setStatus("Walking to Hopper load tile "
+                    + HOPPER_APPROACH_TILE.getX() + ","
+                    + HOPPER_APPROACH_TILE.getY() + ","
+                    + HOPPER_APPROACH_TILE.getPlane()
+                    + " dist=" + HOPPER_APPROACH_TILE.tileDistanceTo(ctx));
+            Time.sleep(650, 1000);
+            return false;
+        }
+
+        stats.setStatus("Walking to Hopper load tile "
+                + HOPPER_APPROACH_TILE.getX() + ","
+                + HOPPER_APPROACH_TILE.getY() + ","
+                + HOPPER_APPROACH_TILE.getPlane()
+                + " before deposit");
+        boolean walking = ctx.walking().walkTo(HOPPER_APPROACH_TILE);
+        if (!walking) {
+            ctx.webWalking().setUseTeleports(false);
+            ctx.webWalking().walkTo(HOPPER_APPROACH_TILE);
+        }
+        Time.sleep(900, 1500,
+                () -> ctx.localPlayer().isMoving() || HOPPER_APPROACH_TILE.tileDistanceTo(ctx) <= 1,
+                100);
+        return HOPPER_APPROACH_TILE.tileDistanceTo(ctx) <= 1;
     }
 
     private int totalPaste(APIContext ctx) {
