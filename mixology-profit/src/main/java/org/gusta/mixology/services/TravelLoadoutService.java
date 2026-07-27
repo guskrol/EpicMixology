@@ -133,18 +133,13 @@ public class TravelLoadoutService {
             purchasesPlanned = false;
             return false;
         }
-        if (!hasStaminaInInventory(ctx)) {
-            stats.setStatus("Travel loadout missing stamina potion");
-            purchasesPlanned = false;
-            return false;
-        }
         if (!hasAnySelectedGearEquipped(ctx)) {
             stats.setStatus("Travel loadout missing equipped random gear");
             purchasesPlanned = false;
             return false;
         }
 
-        stats.setStatus("Travel loadout ready: ROW equipped, stamina carried, random gear equipped");
+        stats.setStatus("Travel loadout ready: ROW equipped, stamina optional, random gear equipped");
         return true;
     }
 
@@ -220,14 +215,6 @@ public class TravelLoadoutService {
                     TravelItems.RING_OF_WEALTH_BUY,
                     1,
                     loadoutBuyPrice(ctx, TravelItems.RING_OF_WEALTH_BUY, 20_000),
-                    true
-            ));
-        }
-        if (!hasStaminaAnywhere(ctx)) {
-            missing.add(new LoadoutPurchase(
-                    TravelItems.STAMINA_BUY,
-                    1,
-                    loadoutBuyPrice(ctx, TravelItems.STAMINA_BUY, 15_000),
                     true
             ));
         }
@@ -651,15 +638,12 @@ public class TravelLoadoutService {
 
         if (!hasStaminaInInventory(ctx)) {
             String stamina = firstBankItem(ctx, TravelItems.STAMINA_POTIONS);
-            if (stamina == null) {
-                purchasesPlanned = false;
-                stats.setStatus("Stamina potion missing after loadout purchases");
+            if (stamina != null) {
+                stats.setStatus("Withdrawing optional stamina potion");
+                withdrawOne(ctx, stamina);
+                Time.sleep(500, 900);
                 return true;
             }
-            stats.setStatus("Withdrawing stamina potion");
-            withdrawOne(ctx, stamina);
-            Time.sleep(500, 900);
-            return true;
         }
 
         int inventoryCoins = ctx.inventory().getCount(true, COINS);
@@ -689,8 +673,7 @@ public class TravelLoadoutService {
     }
 
     private boolean needsMandatoryBankWithdrawal(APIContext ctx) {
-        return (!hasChargedRingEquipped(ctx) && !hasChargedRingInInventory(ctx))
-                || !hasStaminaInInventory(ctx);
+        return !hasChargedRingEquipped(ctx) && !hasChargedRingInInventory(ctx);
     }
 
     private boolean equipInventoryLoadout(APIContext ctx) {
@@ -828,10 +811,6 @@ public class TravelLoadoutService {
     private boolean hasChargedRingInInventory(APIContext ctx) {
         return ctx.inventory().contains(item ->
                 item != null && TravelItems.isChargedRingOfWealth(item.getName()));
-    }
-
-    private boolean hasStaminaAnywhere(APIContext ctx) {
-        return hasStaminaInInventory(ctx) || firstBankItem(ctx, TravelItems.STAMINA_POTIONS) != null;
     }
 
     private boolean hasStaminaInInventory(APIContext ctx) {
