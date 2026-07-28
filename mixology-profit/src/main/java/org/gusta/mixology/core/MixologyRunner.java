@@ -2,6 +2,7 @@ package org.gusta.mixology.core;
 
 import com.epicbot.api.shared.APIContext;
 import com.epicbot.api.shared.model.Skill;
+import com.epicbot.api.shared.model.Tile;
 import com.epicbot.api.shared.util.time.Time;
 import org.gusta.mixology.config.MixologySettings;
 import org.gusta.mixology.domain.HopperStock;
@@ -65,6 +66,11 @@ public class MixologyRunner implements ScriptModule {
     private long lastRunnerFinishedAt;
     private long mixBasesRequestedAt;
     private int restockThreshold = randomRestockThreshold();
+    private boolean travelCheckpointLock;
+    private boolean checkpointPurchaseRequired;
+    private boolean startupRouteEvaluationComplete;
+    private Tile startupLocationCandidate;
+    private int startupLocationStableCycles;
 
     public MixologyRunner(
             MixologySettings settings,
@@ -117,6 +123,24 @@ public class MixologyRunner implements ScriptModule {
             stats.startExperienceIfNeeded(ctx);
             stats.setState(state.name());
             logPeriodicSnapshot(ctx);
+
+            if (!startupRouteEvaluationComplete && isStartupRouteEvaluationState(state)) {
+                if (!completeStartupRouteEvaluation(ctx)) {
+                    return;
+                }
+            }
+
+            if (!travelCheckpointLock && travel.canResumeTravelCheckpoint(ctx)) {
+                travelCheckpointLock = true;
+                stats.debug("Travel checkpoint lock enabled at " + ctx.localPlayer().getLocation());
+            }
+            if (travelCheckpointLock
+                    && state != MixologyState.CHECK_REQUIREMENTS
+                    && state != MixologyState.TRAVEL_TO_MIXOLOGY) {
+                state = MixologyState.TRAVEL_TO_MIXOLOGY;
+                stats.setState(state.name());
+                stats.setStatus("Checkpoint lock: finish route to minigame bank before BUY_SUPPLIES");
+            }
 
             if (state == MixologyState.PREPARE_SUPPLIES
                     && travel.isAtSociety(ctx)
@@ -173,6 +197,58 @@ public class MixologyRunner implements ScriptModule {
         }
     }
 
+    private boolean completeStartupRouteEvaluation(APIContext ctx) {
+        Tile location = ctx.localPlayer().getLocation();
+        if (location == null) {
+            startupLocationCandidate = null;
+            startupLocationStableCycles = 0;
+            stats.setStatus("Startup guard: waiting for a valid player location before planning/buying");
+            Time.sleep(500, 800);
+            return false;
+        }
+
+        if (!sameTile(location, startupLocationCandidate)) {
+            startupLocationCandidate = location;
+            startupLocationStableCycles = 1;
+        } else {
+            startupLocationStableCycles++;
+        }
+        if (startupLocationStableCycles < 2) {
+            stats.setStatus("Startup guard: confirming stable location " + location
+                    + " cycle=" + startupLocationStableCycles + "/2");
+            Time.sleep(500, 800);
+            return false;
+        }
+
+        boolean observedDock = travel.isObservedAldarinDockCheckpoint(ctx);
+        boolean checkpoint = observedDock || travel.canResumeTravelCheckpoint(ctx);
+        startupRouteEvaluationComplete = true;
+        if (checkpoint) {
+            travelCheckpointLock = true;
+        }
+        stats.debug("Startup route evaluation complete: loc=" + location
+                + " stableCycles=" + startupLocationStableCycles
+                + " observedDock=" + observedDock
+                + " checkpoint=" + checkpoint
+                + " lock=" + travelCheckpointLock);
+        return true;
+    }
+
+    private boolean isStartupRouteEvaluationState(MixologyState candidate) {
+        return candidate == MixologyState.CHECK_REQUIREMENTS
+                || candidate == MixologyState.PLAN_PROFIT
+                || candidate == MixologyState.BUY_SUPPLIES
+                || candidate == MixologyState.PREPARE_LOADOUT;
+    }
+
+    private boolean sameTile(Tile left, Tile right) {
+        return left != null
+                && right != null
+                && left.getX() == right.getX()
+                && left.getY() == right.getY()
+                && left.getPlane() == right.getPlane();
+    }
+
     private void checkRequirements(APIContext ctx) {
         int herblore = herbloreLevel(ctx);
         stats.debug("Checking requirements: Herblore=" + herblore
@@ -185,7 +261,13 @@ public class MixologyRunner implements ScriptModule {
         }
 
         stats.setStatus("Requirements look OK for startup; Herblore=" + herblore);
-        state = MixologyState.PLAN_PROFIT;
+        if (travel.canResumeTravelCheckpoint(ctx)) {
+            travelCheckpointLock = true;
+            stats.setStatus("Requirements OK; locking route until minigame bank");
+            state = MixologyState.TRAVEL_TO_MIXOLOGY;
+        } else {
+            state = MixologyState.PLAN_PROFIT;
+        }
     }
 
     private void planProfit(APIContext ctx) {
@@ -207,7 +289,7 @@ public class MixologyRunner implements ScriptModule {
     }
 
     private void buySupplies(APIContext ctx) {
-        if (!restockRequested && travel.isInMixologyContext(ctx)) {
+        if (!restockRequested && !checkpointPurchaseRequired && travel.isInMixologyContext(ctx)) {
             stats.setStatus("Already inside Mixology lab; preparing supplies");
             state = MixologyState.PREPARE_SUPPLIES;
             return;
@@ -218,6 +300,12 @@ public class MixologyRunner implements ScriptModule {
             return;
         }
         if (supplyPurchase.ensureStarterSupplies(ctx)) {
+            checkpointPurchaseRequired = false;
+            if (travel.isInMixologyContext(ctx)) {
+                stats.setStatus("Minigame bank supplies confirmed; preparing Mixology supplies");
+                state = MixologyState.PREPARE_SUPPLIES;
+                return;
+            }
             travelLoadout.resetForRestock();
             state = MixologyState.PREPARE_LOADOUT;
         }
@@ -230,6 +318,22 @@ public class MixologyRunner implements ScriptModule {
     }
 
     private void travelToMixology(APIContext ctx) {
+        if (travelCheckpointLock) {
+            if (travel.completeCheckpointRouteToBank(ctx)) {
+                travelCheckpointLock = false;
+                stats.setStatus("Checkpoint route complete; inspecting minigame bank supplies");
+                if (supplyPurchase.ensureStarterSupplies(ctx)) {
+                    checkpointPurchaseRequired = false;
+                    stats.setStatus("Minigame bank supplies already sufficient; continuing locally");
+                    state = MixologyState.PREPARE_SUPPLIES;
+                } else {
+                    checkpointPurchaseRequired = true;
+                    stats.setStatus("Minigame bank supplies insufficient; enabling BUY_SUPPLIES");
+                    state = MixologyState.BUY_SUPPLIES;
+                }
+            }
+            return;
+        }
         if (travel.goToSociety(ctx)) {
             stats.recordTripStarted();
             state = MixologyState.PREPARE_SUPPLIES;
