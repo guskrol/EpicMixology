@@ -597,15 +597,16 @@ public class BankService {
 
         if (objects.interact(ctx, settings.alchemicalSocietyArea(),
                 new String[]{"Bank chest", "Bank"}, "Bank")) {
-            Time.sleep(900, 1500, () -> ctx.bank().isOpen(), 100);
+            Time.sleep(900, 1500, () -> ctx.bank().isOpen()
+                    || ctx.dialogues().isDialogueOpen()
+                    || ctx.dialogues().isChatOpen()
+                    || ctx.dialogues().canContinue(), 100);
             if (ctx.bank().isOpen()) {
                 return true;
             }
+            BankOpenService.closeBlockingContext(ctx);
         }
 
-        stats.setStatus("Opening nearest bank");
-        ctx.bank().open();
-        Time.sleep(1000, 1600, () -> ctx.bank().isOpen(), 100);
-        return ctx.bank().isOpen();
+        return BankOpenService.open(ctx, stats, "Opening nearest bank");
     }
 }

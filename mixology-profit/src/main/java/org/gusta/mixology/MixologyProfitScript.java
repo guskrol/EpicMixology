@@ -40,7 +40,7 @@ import java.util.List;
 
 @ScriptManifest(name = "Mixology Profit", gameType = GameType.OS)
 public class MixologyProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.42-max-zoom-lock";
+    private static final String SCRIPT_VERSION = "v0.2.43-bank-dialogue-retry";
 
     private MixologyStats stats;
     private MixologyPaint paint;

@@ -785,10 +785,7 @@ public class TravelLoadoutService {
             return false;
         }
 
-        stats.setStatus("Opening bank for travel loadout");
-        ctx.bank().open();
-        Time.sleep(1000, 1600, () -> ctx.bank().isOpen(), 100);
-        return ctx.bank().isOpen();
+        return BankOpenService.open(ctx, stats, "Opening bank for travel loadout");
     }
 
     private GrandExchangeSlot findActiveSlot(APIContext ctx, String itemName) {

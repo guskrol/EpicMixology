@@ -134,8 +134,7 @@ public class TravelService {
 
         stats.setStatus("Checkpoint lock: locating minigame bank");
         if (ctx.bank().isReachable()) {
-            ctx.bank().open();
-            Time.sleep(900, 1500, () -> ctx.bank().isOpen(), 100);
+            BankOpenService.open(ctx, stats, "Checkpoint lock: opening reachable bank");
         } else {
             Time.sleep(700, 1100);
         }

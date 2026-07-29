@@ -380,8 +380,7 @@ public class AldariumRewardService {
                 Time.sleep(1200, 1800);
                 return false;
             }
-            ctx.bank().open();
-            Time.sleep(1000, 1600, () -> ctx.bank().isOpen(), 100);
+            BankOpenService.open(ctx, stats, "Opening bank to check for Aldarium before restock sale");
             return false;
         }
 
