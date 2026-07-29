@@ -12,12 +12,12 @@ public final class TravelItems {
             "Ring of wealth (1)"
     };
 
-    public static final String STAMINA_BUY = "Stamina potion(4)";
+    public static final String STAMINA_BUY = "Stamina potion(1)";
     public static final String[] STAMINA_POTIONS = {
-            "Stamina potion(4)",
-            "Stamina potion(3)",
+            "Stamina potion(1)",
             "Stamina potion(2)",
-            "Stamina potion(1)"
+            "Stamina potion(3)",
+            "Stamina potion(4)"
     };
 
     private TravelItems() {

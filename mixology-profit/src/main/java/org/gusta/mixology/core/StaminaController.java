@@ -7,7 +7,8 @@ import org.gusta.mixology.data.TravelItems;
 import org.gusta.mixology.stats.MixologyStats;
 
 public class StaminaController implements RuntimeController {
-    private static final int DRINK_RUN_ENERGY = 35;
+    private static final int DRINK_RUN_ENERGY_MIN = 30;
+    private static final int DRINK_RUN_ENERGY_MAX = 50;
     private static final int ENABLE_RUN_ENERGY = 45;
     private static final long SIP_COOLDOWN_MILLIS = 110_000L;
 
@@ -33,7 +34,8 @@ public class StaminaController implements RuntimeController {
         if (!ctx.walking().isRunEnabled() && energy >= ENABLE_RUN_ENERGY) {
             return true;
         }
-        return energy <= DRINK_RUN_ENERGY
+        return energy >= DRINK_RUN_ENERGY_MIN
+                && energy <= DRINK_RUN_ENERGY_MAX
                 && System.currentTimeMillis() >= nextSipAt
                 && staminaPotion(ctx) != null;
     }
@@ -45,6 +47,10 @@ public class StaminaController implements RuntimeController {
             stats.setStatus("Enabling run energy=" + energy);
             ctx.walking().setRun(true);
             Time.sleep(400, 700);
+            return;
+        }
+
+        if (energy < DRINK_RUN_ENERGY_MIN || energy > DRINK_RUN_ENERGY_MAX) {
             return;
         }
 

@@ -1,12 +1,16 @@
 package org.gusta.mixology.services;
 
 import com.epicbot.api.shared.APIContext;
+import com.epicbot.api.shared.entity.ItemWidget;
 import com.epicbot.api.shared.entity.NPC;
+import com.epicbot.api.shared.entity.SceneObject;
 import com.epicbot.api.shared.entity.WidgetChild;
+import com.epicbot.api.shared.methods.IEquipmentAPI;
 import com.epicbot.api.shared.model.Area;
 import com.epicbot.api.shared.model.Tile;
 import com.epicbot.api.shared.util.time.Time;
 import org.gusta.mixology.config.MixologySettings;
+import org.gusta.mixology.data.TravelItems;
 import org.gusta.mixology.stats.MixologyStats;
 
 import java.awt.event.KeyEvent;
@@ -16,12 +20,21 @@ import java.util.Locale;
 public class CharterShipService {
     private static final String COINS = "Coins";
     private static final int ALDARIN_CHARTER_FARE = 3_100;
-    private static final int PORT_SARIM_TRADER_CREWMEMBER_ID = 12793;
-    private static final int SECONDARY_TRADER_CREWMEMBER_ID = 12805;
-    private static final Tile CHARTER_TRADER_TILE = new Tile(2588, 2851, 0);
-    private static final Area CHARTER_TRADER_AREA = new Area(2578, 2841, 2598, 2861, 0);
+    private static final int PORT_SARIM_TRADER_STAN_ID = 23027;
+    private static final Tile CHARTER_TRADER_TILE = new Tile(3038, 3192, 0);
+    private static final Area CHARTER_TRADER_AREA = new Area(3028, 3182, 3048, 3202, 0);
+    private static final Area FALADOR_ARRIVAL_AREA = new Area(2940, 3350, 2995, 3410, 0);
+    private static final Area FALADOR_TO_PORT_SARIM_ROUTE_AREA = new Area(2930, 3180, 3055, 3425, 0);
+    private static final Area ALDARIN_SHIP_AREA = new Area(1435, 2945, 1485, 2990, 1);
+    private static final Area ALDARIN_LAND_ROUTE_AREA = new Area(1360, 2880, 1485, 3010, 0);
+    private static final Area ALDARIN_ROUTE_REGION = new Area(1200, 2700, 1800, 3200, 0);
+    private static final int OBSERVED_ALDARIN_DOCK_X = 1455;
+    private static final int OBSERVED_ALDARIN_DOCK_Y = 2968;
+    private static final int OBSERVED_ALDARIN_DOCK_RADIUS = 40;
     private static final long RETRY_MILLIS = 60_000L;
     private static final long CHARTER_WIDGET_GRACE_MILLIS = 20_000L;
+    private static final long RING_TELEPORT_TIMEOUT_MILLIS = 12_000L;
+    private static final long ALDARIN_TRAVEL_TIMEOUT_MILLIS = 15_000L;
 
     private final MixologySettings settings;
     private final MixologyStats stats;
@@ -29,6 +42,13 @@ public class CharterShipService {
     private long nextAttemptAt;
     private long nextNpcDiagnosticAt;
     private long lastCharterInteractionAt;
+    private long ringTeleportPendingUntil;
+    private Tile ringTeleportOrigin;
+    private boolean faladorRouteStarted;
+    private long aldarinTravelPendingUntil;
+    private Tile aldarinTravelOrigin;
+    private long nextGangplankClickAt;
+    private long nextCheckpointDiagnosticAt;
 
     public CharterShipService(MixologySettings settings, MixologyStats stats) {
         this.settings = settings;
@@ -39,11 +59,20 @@ public class CharterShipService {
         if (settings.alchemicalSocietyArea().contains(ctx.localPlayer().getLocation())) {
             return true;
         }
+        if (handleAldarinCheckpoint(ctx)) {
+            return true;
+        }
+        if (waitForPendingAldarinTravel(ctx)) {
+            return true;
+        }
         if (System.currentTimeMillis() < nextAttemptAt) {
-            return false;
+            stats.setStatus("Waiting before retrying Ring of wealth charter route");
+            Time.sleep(700, 1100);
+            return true;
         }
         if (!hasFare(ctx)) {
-            stats.setStatus("No coins for Aldarin charter ship; falling back to webwalking");
+            stats.setStatus("Ring/charter route blocked: Aldarin requires "
+                    + ALDARIN_CHARTER_FARE + " coins");
             nextAttemptAt = System.currentTimeMillis() + RETRY_MILLIS;
             return false;
         }
@@ -58,7 +87,11 @@ public class CharterShipService {
             return true;
         }
 
-        NPC trader = findTraderCrewmember(ctx);
+        if (prepareFaladorRoute(ctx)) {
+            return true;
+        }
+
+        NPC trader = findTraderStan(ctx);
         if (trader != null && trader.isValid()) {
             return interactWithTrader(ctx, trader);
         }
@@ -71,6 +104,257 @@ public class CharterShipService {
         return ctx.inventory().getCount(true, COINS) >= ALDARIN_CHARTER_FARE;
     }
 
+    public boolean canResumeFromCheckpoint(APIContext ctx) {
+        Tile location = ctx.localPlayer().getLocation();
+        if (location == null) {
+            return false;
+        }
+        boolean shipCheckpoint = isAldarinShipContext(ctx);
+        boolean aldarinLandCheckpoint = isAldarinLandCheckpoint(ctx);
+        boolean observedDockCheckpoint = isObservedAldarinDockCheckpoint(location);
+        boolean preCharterCheckpoint = hasFare(ctx)
+                && (FALADOR_ARRIVAL_AREA.contains(location)
+                || FALADOR_TO_PORT_SARIM_ROUTE_AREA.contains(location)
+                || CHARTER_TRADER_AREA.contains(location));
+        boolean checkpoint = shipCheckpoint
+                || aldarinLandCheckpoint
+                || observedDockCheckpoint
+                || settings.societySurfaceArea().contains(location)
+                || preCharterCheckpoint;
+        logCheckpointScan(ctx, location, shipCheckpoint, aldarinLandCheckpoint,
+                preCharterCheckpoint, checkpoint);
+        return checkpoint;
+    }
+
+    public boolean isObservedAldarinDockCheckpoint(APIContext ctx) {
+        return isObservedAldarinDockCheckpoint(ctx.localPlayer().getLocation());
+    }
+
+    private boolean isObservedAldarinDockCheckpoint(Tile location) {
+        return location != null
+                && (location.getPlane() == 0 || location.getPlane() == 1)
+                && Math.abs(location.getX() - OBSERVED_ALDARIN_DOCK_X) <= OBSERVED_ALDARIN_DOCK_RADIUS
+                && Math.abs(location.getY() - OBSERVED_ALDARIN_DOCK_Y) <= OBSERVED_ALDARIN_DOCK_RADIUS;
+    }
+
+    private boolean handleAldarinCheckpoint(APIContext ctx) {
+        Tile location = ctx.localPlayer().getLocation();
+        boolean observedDock = isObservedAldarinDockCheckpoint(location);
+        if (isAldarinShipContext(ctx)
+                || (observedDock && location != null && location.getPlane() == 1)) {
+            aldarinTravelPendingUntil = 0L;
+            aldarinTravelOrigin = null;
+            nextAttemptAt = 0L;
+            return leaveAldarinShip(ctx);
+        }
+        if (!isAldarinLandCheckpoint(ctx)
+                && !(observedDock && location != null && location.getPlane() == 0)) {
+            return false;
+        }
+
+        aldarinTravelPendingUntil = 0L;
+        aldarinTravelOrigin = null;
+        nextAttemptAt = 0L;
+        if (settings.societySurfaceArea().contains(location)) {
+            stats.setStatus("Aldarin land checkpoint confirmed near Alchemical Society");
+            return true;
+        }
+        if (ctx.localPlayer().isMoving()) {
+            stats.setStatus("Continuing from Aldarin dock checkpoint toward Alchemical Society");
+            Time.sleep(700, 1100);
+            return true;
+        }
+
+        stats.setStatus("Aldarin dock checkpoint: walking to Alchemical Society surface");
+        ctx.webWalking().setUseTeleports(false);
+        ctx.webWalking().walkTo(settings.societyCenterTile());
+        Time.sleep(1200, 1800,
+                () -> settings.societySurfaceArea().contains(ctx.localPlayer().getLocation())
+                        || ctx.localPlayer().isMoving(), 100);
+        return true;
+    }
+
+    private boolean leaveAldarinShip(APIContext ctx) {
+        long now = System.currentTimeMillis();
+        if (now < nextGangplankClickAt) {
+            stats.setStatus("Waiting for Aldarin Gangplank transition");
+            Time.sleep(700, 1100);
+            return true;
+        }
+        if (ctx.localPlayer().isMoving() || ctx.localPlayer().isAnimating()) {
+            stats.setStatus("Waiting until stable before crossing Aldarin Gangplank");
+            Time.sleep(500, 800);
+            return true;
+        }
+
+        SceneObject gangplank = findAldarinGangplank(ctx);
+        if (gangplank == null || !gangplank.isValid()) {
+            stats.setStatus("Inside Aldarin ship; waiting for Gangplank object");
+            Time.sleep(700, 1100);
+            return true;
+        }
+
+        String action = gangplank.hasAction("Cross")
+                ? "Cross"
+                : gangplank.hasAction("Walk-across")
+                ? "Walk-across"
+                : gangplank.hasAction("Disembark")
+                ? "Disembark"
+                : null;
+        stats.setStatus("Leaving Aldarin ship via Gangplank"
+                + (action == null ? "" : " action=" + action));
+        ctx.camera().turnTo(gangplank);
+        boolean clicked = action == null ? gangplank.click() : gangplank.interact(action);
+        nextGangplankClickAt = now + 6_000L;
+        if (clicked) {
+            Time.sleep(1000, 1800,
+                    () -> !ALDARIN_SHIP_AREA.contains(ctx.localPlayer().getLocation())
+                            || ctx.localPlayer().isMoving(), 100);
+        } else {
+            stats.debug("Aldarin Gangplank click rejected: id=" + gangplank.getId()
+                    + " tile=" + gangplank.getLocation()
+                    + " actions=" + gangplank.getActions());
+            Time.sleep(700, 1100);
+        }
+        return true;
+    }
+
+    private SceneObject findAldarinGangplank(APIContext ctx) {
+        SceneObject gangplank = ctx.objects()
+                .query()
+                .nameContains("Gangplank")
+                .within(ALDARIN_SHIP_AREA)
+                .results()
+                .nearest();
+        if (gangplank != null && gangplank.isValid()) {
+            return gangplank;
+        }
+        return ctx.objects()
+                .query()
+                .nameContains("Gangplank")
+                .results()
+                .nearest();
+    }
+
+    private boolean isAldarinShipContext(APIContext ctx) {
+        Tile location = ctx.localPlayer().getLocation();
+        if (location == null) {
+            return false;
+        }
+        if (ALDARIN_SHIP_AREA.contains(location)) {
+            return true;
+        }
+        return location.getPlane() == 1
+                && location.getX() >= 1200
+                && location.getX() <= 1800
+                && location.getY() >= 2700
+                && location.getY() <= 3200
+                && findAldarinGangplank(ctx) != null;
+    }
+
+    private boolean isAldarinLandCheckpoint(APIContext ctx) {
+        Tile location = ctx.localPlayer().getLocation();
+        if (location == null || location.getPlane() != 0) {
+            return false;
+        }
+        return isWithin(location, 1200, 2700, 1800, 3200)
+                || ALDARIN_LAND_ROUTE_AREA.contains(location)
+                || ALDARIN_ROUTE_REGION.contains(location)
+                || settings.societySurfaceArea().contains(location);
+    }
+
+    private boolean isWithin(Tile location, int minX, int minY, int maxX, int maxY) {
+        return location != null
+                && location.getX() >= minX
+                && location.getX() <= maxX
+                && location.getY() >= minY
+                && location.getY() <= maxY;
+    }
+
+    private void logCheckpointScan(
+            APIContext ctx,
+            Tile location,
+            boolean shipCheckpoint,
+            boolean aldarinLandCheckpoint,
+            boolean preCharterCheckpoint,
+            boolean checkpoint
+    ) {
+        long now = System.currentTimeMillis();
+        if (now < nextCheckpointDiagnosticAt) {
+            return;
+        }
+        nextCheckpointDiagnosticAt = now + 5_000L;
+        SceneObject gangplank = findAldarinGangplank(ctx);
+        stats.debug("Travel checkpoint scan: loc=" + location
+                + " ship=" + shipCheckpoint
+                + " aldarinLand=" + aldarinLandCheckpoint
+                + " preCharter=" + preCharterCheckpoint
+                + " fare=" + ctx.inventory().getCount(true, COINS)
+                + " gangplank=" + (gangplank == null
+                ? "none"
+                : gangplank.getId() + "@" + gangplank.getLocation() + " actions=" + gangplank.getActions())
+                + " result=" + checkpoint);
+    }
+
+    private boolean prepareFaladorRoute(APIContext ctx) {
+        if (isNearTraderTile(ctx)
+                || FALADOR_ARRIVAL_AREA.contains(ctx.localPlayer().getLocation())
+                || FALADOR_TO_PORT_SARIM_ROUTE_AREA.contains(ctx.localPlayer().getLocation())
+                || faladorRouteStarted) {
+            faladorRouteStarted = true;
+            ringTeleportPendingUntil = 0L;
+            ringTeleportOrigin = null;
+            return false;
+        }
+
+        long now = System.currentTimeMillis();
+        if (ringTeleportPendingUntil > 0L) {
+            if (hasMovedFrom(ctx, ringTeleportOrigin, 20)) {
+                faladorRouteStarted = true;
+                ringTeleportPendingUntil = 0L;
+                ringTeleportOrigin = null;
+                stats.setStatus("Ring of wealth teleport confirmed; walking to Trader Stan");
+                return false;
+            }
+            if (now < ringTeleportPendingUntil) {
+                stats.setStatus("Waiting for Ring of wealth Falador teleport");
+                Time.sleep(700, 1100);
+                return true;
+            }
+            stats.debug("Ring of wealth Falador teleport was not confirmed; retrying once stable");
+            ringTeleportPendingUntil = 0L;
+            ringTeleportOrigin = null;
+        }
+
+        ItemWidget ring = ctx.equipment().getItem(IEquipmentAPI.Slot.RING);
+        if (ring == null || !TravelItems.isChargedRingOfWealth(ring.getName())) {
+            stats.setStatus("Ring route blocked: charged Ring of wealth is not equipped");
+            Time.sleep(700, 1100);
+            return true;
+        }
+        if (ctx.localPlayer().isMoving() || ctx.localPlayer().isAnimating()) {
+            stats.setStatus("Waiting until stable before Ring of wealth Falador teleport");
+            Time.sleep(500, 800);
+            return true;
+        }
+
+        stats.setStatus("Teleporting to Falador with equipped " + ring.getName());
+        Tile origin = ctx.localPlayer().getLocation();
+        boolean interacted = ring.interact("Falador", ring.getName())
+                || ring.interact("Falador");
+        if (interacted) {
+            ringTeleportOrigin = origin;
+            ringTeleportPendingUntil = now + RING_TELEPORT_TIMEOUT_MILLIS;
+            Time.sleep(900, 1400,
+                    () -> FALADOR_ARRIVAL_AREA.contains(ctx.localPlayer().getLocation())
+                            || hasMovedFrom(ctx, origin, 20), 100);
+        } else {
+            stats.setStatus("Could not select Falador on equipped Ring of wealth");
+            Time.sleep(700, 1100);
+        }
+        return true;
+    }
+
     private boolean closeGangplankMenu(APIContext ctx) {
         if (!ctx.menu().isOpen()) {
             return false;
@@ -80,7 +364,7 @@ public class CharterShipService {
         if (!menu.contains("gangplank")) {
             return false;
         }
-        stats.setStatus("Closing Gangplank menu; charter uses Trader Crewmember at "
+        stats.setStatus("Closing Gangplank menu; charter uses Trader Stan at "
                 + tileText(CHARTER_TRADER_TILE));
         ctx.menu().closeMenu();
         Time.sleep(250, 450);
@@ -117,7 +401,7 @@ public class CharterShipService {
             return true;
         }
         if (trader.tileDistanceTo(ctx) > 3 && !ctx.localPlayer().isMoving()) {
-            stats.setStatus("Walking next to Trader Crewmember before charter interaction: "
+            stats.setStatus("Walking next to Trader Stan before charter interaction: "
                     + describeTrader(ctx, trader));
             ctx.webWalking().setUseTeleports(false);
             ctx.webWalking().walkTo(trader.getLocation());
@@ -125,29 +409,23 @@ public class CharterShipService {
             return true;
         }
 
-        stats.setStatus("Charter NPC found; interacting with " + describeTrader(ctx, trader));
+        stats.setStatus("Right-clicking Trader Stan for Charter: " + describeTrader(ctx, trader));
         ctx.camera().turnTo(trader);
-        boolean interacted = trader.interact("Charter", "Trader Crewmember")
-                || trader.interact("Charter")
-                || trader.interactMatch("Charter")
-                || ctx.menu().interact("Charter", "Trader Crewmember", trader, true)
-                || ctx.menu().interact("Charter", trader, true)
-                || ctx.menu().interact("Charter", trader, false)
-                || trader.interact("Talk-to", "Trader Crewmember")
-                || trader.interact("Talk-to")
-                || ctx.menu().interact("Talk-to", "Trader Crewmember", trader, true)
-                || ctx.menu().interact("Talk-to", trader, true);
-        if (interacted) {
-            markCharterInteraction();
-            boolean opened = waitForCharterInterface(ctx);
-            if (!opened) {
-                stats.debug("Trader Crewmember interaction did not open charter interface/dialogue yet; will retry. "
-                        + describeTrader(ctx, trader));
+        boolean menuOpened = ctx.mouse().click(trader, true) || trader.click(true);
+        if (menuOpened) {
+            Time.sleep(350, 650, () -> ctx.menu().isOpen(), 50);
+            if (ctx.menu().isOpen() && selectCharterFromOpenMenu(ctx, trader)) {
+                markCharterInteraction();
+                boolean opened = waitForCharterInterface(ctx);
+                if (!opened) {
+                    stats.debug("Trader Stan Charter action did not open the charter map yet; will retry. "
+                            + describeTrader(ctx, trader));
+                }
             }
             return true;
         }
 
-        stats.setStatus("Could not click Charter on " + describeTrader(ctx, trader));
+        stats.setStatus("Could not right-click Trader Stan for Charter: " + describeTrader(ctx, trader));
         if (!isNearTraderTile(ctx)) {
             return walkToTraderTile(ctx);
         }
@@ -155,29 +433,10 @@ public class CharterShipService {
         return true;
     }
 
-    private NPC findTraderCrewmember(APIContext ctx) {
+    private NPC findTraderStan(APIContext ctx) {
         NPC trader = ctx.npcs()
                 .query()
-                .id(PORT_SARIM_TRADER_CREWMEMBER_ID)
-                .results()
-                .nearest();
-        if (trader != null && trader.isValid()) {
-            return trader;
-        }
-
-        trader = ctx.npcs()
-                .query()
-                .id(SECONDARY_TRADER_CREWMEMBER_ID)
-                .results()
-                .nearest();
-        if (trader != null && trader.isValid()) {
-            return trader;
-        }
-
-        trader = ctx.npcs()
-                .query()
-                .nameContains("Trader Crewmember")
-                .actions("Charter")
+                .id(PORT_SARIM_TRADER_STAN_ID)
                 .results()
                 .nearest();
         if (trader != null && trader.isValid()) {
@@ -186,7 +445,8 @@ public class CharterShipService {
 
         return ctx.npcs()
                 .query()
-                .nameContains("Trader Crewmember")
+                .named("Trader Stan")
+                .actions("Charter")
                 .results()
                 .nearest();
     }
@@ -194,7 +454,7 @@ public class CharterShipService {
     private boolean walkToTraderTile(APIContext ctx) {
         if (isNearTraderTile(ctx)) {
             stats.setStatus("At charter NPC tile " + tileText(CHARTER_TRADER_TILE)
-                    + "; waiting for Trader Crewmember");
+                    + "; waiting for Trader Stan id=" + PORT_SARIM_TRADER_STAN_ID);
             Time.sleep(700, 1100);
             return true;
         }
@@ -204,8 +464,8 @@ public class CharterShipService {
             return true;
         }
 
-        stats.setStatus("Webwalking to Trader Crewmember tile " + tileText(CHARTER_TRADER_TILE));
-        ctx.webWalking().setUseTeleports(true);
+        stats.setStatus("Webwalking to Trader Stan at Port Sarim " + tileText(CHARTER_TRADER_TILE));
+        ctx.webWalking().setUseTeleports(false);
         ctx.webWalking().walkTo(CHARTER_TRADER_TILE);
         Time.sleep(1200, 1800);
         return true;
@@ -220,20 +480,17 @@ public class CharterShipService {
         stats.debug("Selecting Charter from open menu for " + describeTrader(ctx, trader)
                 + " menuActions=" + ctx.menu().getActions()
                 + " menuOptions=" + ctx.menu().getOptions());
-        return ctx.menu().interact("Charter", "Trader Crewmember", trader, true)
+        return ctx.menu().interact("Charter", "Trader Stan", trader, true)
                 || ctx.menu().interact("Charter", trader, true)
                 || ctx.menu().interact("Charter", trader, false)
                 || ctx.menu().interact("Charter", true)
-                || ctx.menu().interact("Charter", false)
-                || ctx.menu().interact("Talk-to", "Trader Crewmember", trader, true)
-                || ctx.menu().interact("Talk-to", trader, true)
-                || ctx.menu().interact("Talk-to", true);
+                || ctx.menu().interact("Charter", false);
     }
 
     private boolean waitForCharterInterface(APIContext ctx) {
         Time.sleep(900, 1500,
-                () -> hasWidgetText(ctx, "aldarin") || ctx.dialogues().isDialogueOpen(), 100);
-        return hasWidgetText(ctx, "aldarin") || ctx.dialogues().isDialogueOpen() || ctx.dialogues().isChatOpen();
+                () -> isCharterInterfaceOpen(ctx) || ctx.dialogues().isDialogueOpen(), 100);
+        return isCharterInterfaceOpen(ctx) || ctx.dialogues().isDialogueOpen() || ctx.dialogues().isChatOpen();
     }
 
     private void markCharterInteraction() {
@@ -278,22 +535,58 @@ public class CharterShipService {
         }
 
         if (!charterContext) {
-            if (hasWidgetText(ctx, "aldarin")) {
+            if (isCharterInterfaceOpen(ctx)) {
                 stats.debug("Ignoring Aldarin widget outside charter context at loc="
                         + ctx.localPlayer().getLocation());
             }
             return false;
         }
 
-        WidgetChild aldarin = findWidgetText(ctx, "aldarin");
-        if (aldarin != null && (aldarin.interact("Travel")
-                || aldarin.interact("Charter")
-                || aldarin.click())) {
-            stats.setStatus("Selecting Aldarin on charter ship map");
+        if (isCharterInterfaceOpen(ctx)) {
+            stats.setStatus("Selecting Aldarin on charter map with keyboard shortcut E");
+            aldarinTravelOrigin = ctx.localPlayer().getLocation();
+            ctx.keyboard().sendKey(KeyEvent.VK_E);
+            aldarinTravelPendingUntil = System.currentTimeMillis() + ALDARIN_TRAVEL_TIMEOUT_MILLIS;
             Time.sleep(900, 1500);
             return true;
         }
         return false;
+    }
+
+    private boolean waitForPendingAldarinTravel(APIContext ctx) {
+        if (aldarinTravelPendingUntil <= 0L) {
+            return false;
+        }
+        if (settings.societySurfaceArea().contains(ctx.localPlayer().getLocation())
+                || hasMovedFrom(ctx, aldarinTravelOrigin, 100)) {
+            stats.setStatus("Aldarin charter arrival confirmed");
+            aldarinTravelPendingUntil = 0L;
+            aldarinTravelOrigin = null;
+            return false;
+        }
+        if (System.currentTimeMillis() < aldarinTravelPendingUntil) {
+            stats.setStatus("Waiting for Aldarin charter travel after shortcut E");
+            Time.sleep(700, 1100);
+            return true;
+        }
+        stats.debug("Aldarin charter travel was not confirmed after shortcut E; reopening via Trader Stan");
+        aldarinTravelPendingUntil = 0L;
+        aldarinTravelOrigin = null;
+        lastCharterInteractionAt = 0L;
+        return false;
+    }
+
+    private boolean hasMovedFrom(APIContext ctx, Tile origin, int minimumDistance) {
+        if (origin == null || ctx.localPlayer().getLocation() == null) {
+            return false;
+        }
+        Tile current = ctx.localPlayer().getLocation();
+        if (origin.getPlane() != current.getPlane()) {
+            return true;
+        }
+        int dx = origin.getX() - current.getX();
+        int dy = origin.getY() - current.getY();
+        return Math.max(Math.abs(dx), Math.abs(dy)) >= minimumDistance;
     }
 
     private boolean isInsufficientFareDialogue(APIContext ctx) {
@@ -317,9 +610,18 @@ public class CharterShipService {
         return findWidgetText(ctx, text) != null;
     }
 
+    private boolean isCharterInterfaceOpen(APIContext ctx) {
+        return hasWidgetText(ctx, "aldarin")
+                && (hasWidgetText(ctx, "brimhaven")
+                || hasWidgetText(ctx, "catherby")
+                || hasWidgetText(ctx, "port khazard")
+                || hasWidgetText(ctx, "port phasmatys"));
+    }
+
     private WidgetChild findWidgetText(APIContext ctx, String needle) {
         List<WidgetChild> widgets = ctx.widgets().getAllChildren(widget -> {
-            if (widget == null || !widget.isValid() || widget.getWidth() <= 0 || widget.getHeight() <= 0) {
+            if (widget == null || !widget.isValid() || !widget.isVisible()
+                    || widget.getWidth() <= 0 || widget.getHeight() <= 0) {
                 return false;
             }
             return normalize(widgetText(widget)).contains(normalize(needle));
@@ -346,8 +648,7 @@ public class CharterShipService {
                 continue;
             }
             if (!normalize(name).contains("trader")
-                    && npc.getId() != PORT_SARIM_TRADER_CREWMEMBER_ID
-                    && npc.getId() != SECONDARY_TRADER_CREWMEMBER_ID
+                    && npc.getId() != PORT_SARIM_TRADER_STAN_ID
                     && !normalize(String.valueOf(npc.getActions())).contains("charter")) {
                 continue;
             }
@@ -370,7 +671,7 @@ public class CharterShipService {
 
     private String describeTrader(APIContext ctx, NPC trader) {
         if (trader == null) {
-            return "Trader Crewmember=null targetTile=" + CHARTER_TRADER_TILE;
+            return "Trader Stan=null targetTile=" + CHARTER_TRADER_TILE;
         }
         return trader.getName()
                 + " id=" + trader.getId()

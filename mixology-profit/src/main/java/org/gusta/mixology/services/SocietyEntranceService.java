@@ -11,16 +11,24 @@ import org.gusta.mixology.stats.MixologyStats;
 import java.awt.event.KeyEvent;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ThreadLocalRandom;
 
 public class SocietyEntranceService {
     private static final int STAIRCASE_ID = 54946;
     private static final Tile STAIRCASE_TILE = new Tile(1389, 2916, 0);
+    private static final Tile[] SOCIETY_APPROACH_PATH = {
+            new Tile(1388, 2920, 0),
+            new Tile(1390, 2919, 0)
+    };
     private static final Area STAIRCASE_AREA = new Area(1383, 2910, 1395, 2922, 0);
-    private static final long STAIRCASE_TRANSITION_GRACE_MILLIS = 12_000L;
+    private static final long STAIRCASE_RETRY_MIN_MILLIS = 3_000L;
+    private static final long STAIRCASE_RETRY_MAX_MILLIS = 4_000L;
 
     private final MixologyStats stats;
     private long nextDiagnosticAt;
     private long staircaseTransitionUntil;
+    private Tile staircaseClickOrigin;
+    private int approachWaypointIndex;
 
     public SocietyEntranceService(MixologyStats stats) {
         this.stats = stats;
@@ -28,7 +36,7 @@ public class SocietyEntranceService {
 
     public boolean isEntranceContext(APIContext ctx) {
         SceneObject staircase = findStaircase(ctx);
-        if (isExitStaircase(staircase) || isWaitingForStaircaseTransition()) {
+        if (isExitStaircase(staircase) || isWaitingForStaircaseTransition(ctx)) {
             return false;
         }
 
@@ -48,8 +56,18 @@ public class SocietyEntranceService {
         return isExitStaircase(findStaircase(ctx));
     }
 
-    public boolean isWaitingForStaircaseTransition() {
-        return System.currentTimeMillis() < staircaseTransitionUntil;
+    public boolean isWaitingForStaircaseTransition(APIContext ctx) {
+        if (staircaseTransitionConfirmed(ctx)) {
+            staircaseTransitionUntil = 0L;
+            staircaseClickOrigin = null;
+            return false;
+        }
+        if (System.currentTimeMillis() < staircaseTransitionUntil) {
+            return true;
+        }
+        staircaseTransitionUntil = 0L;
+        staircaseClickOrigin = null;
+        return false;
     }
 
     public boolean handleEntrance(APIContext ctx) {
@@ -57,9 +75,13 @@ public class SocietyEntranceService {
             return true;
         }
 
-        if (isWaitingForStaircaseTransition()) {
-            stats.setStatus("Waiting for Society staircase transition");
+        if (isWaitingForStaircaseTransition(ctx)) {
+            stats.setStatus("Waiting 3-4s for Society staircase location change");
             Time.sleep(700, 1100);
+            return true;
+        }
+
+        if (walkSocietyApproachPath(ctx)) {
             return true;
         }
 
@@ -174,24 +196,62 @@ public class SocietyEntranceService {
         stats.setStatus("Climbing down Society Staircase id=" + staircase.getId()
                 + " tile=" + staircase.getLocation()
                 + " actions=" + staircase.getActions());
-        boolean clicked = staircase.interact("Climb-down", "Staircase")
-                || staircase.interact("Climb-down")
-                || staircase.interactMatch("Climb-down")
-                || ctx.menu().interact("Climb-down", "Staircase", staircase, true)
-                || ctx.menu().interact("Climb-down", staircase, true)
-                || ctx.menu().interact("Climb-down", staircase, false);
-        if (clicked) {
-            Time.sleep(900, 1500,
-                    () -> ctx.dialogues().isDialogueOpen()
-                            || ctx.dialogues().isChatOpen()
-                            || ctx.localPlayer().isMoving(), 100);
-            if (!ctx.dialogues().isDialogueOpen() && !ctx.dialogues().isChatOpen()) {
-                staircaseTransitionUntil = System.currentTimeMillis() + STAIRCASE_TRANSITION_GRACE_MILLIS;
+        staircaseClickOrigin = ctx.localPlayer().getLocation();
+        boolean clicked = staircase.interact("Climb-down");
+        long retryDelay = ThreadLocalRandom.current().nextLong(
+                STAIRCASE_RETRY_MIN_MILLIS,
+                STAIRCASE_RETRY_MAX_MILLIS + 1L
+        );
+        staircaseTransitionUntil = System.currentTimeMillis() + retryDelay;
+        stats.debug("Society staircase single-click result=" + clicked
+                + " retryBlockedFor=" + retryDelay + "ms"
+                + " origin=" + staircaseClickOrigin);
+        Time.sleep(500, 800);
+        return true;
+    }
+
+    private boolean staircaseTransitionConfirmed(APIContext ctx) {
+        if (staircaseClickOrigin == null || ctx.localPlayer().getLocation() == null) {
+            return false;
+        }
+        Tile current = ctx.localPlayer().getLocation();
+        return current.getPlane() != staircaseClickOrigin.getPlane()
+                || Math.abs(current.getY() - staircaseClickOrigin.getY()) >= 1_000;
+    }
+
+    private boolean walkSocietyApproachPath(APIContext ctx) {
+        Tile finalWaypoint = SOCIETY_APPROACH_PATH[SOCIETY_APPROACH_PATH.length - 1];
+        if (finalWaypoint.tileDistanceTo(ctx) <= 2) {
+            approachWaypointIndex = SOCIETY_APPROACH_PATH.length;
+            return false;
+        }
+        if (approachWaypointIndex >= SOCIETY_APPROACH_PATH.length) {
+            return false;
+        }
+
+        Tile target = SOCIETY_APPROACH_PATH[approachWaypointIndex];
+        if (target.tileDistanceTo(ctx) <= 2) {
+            approachWaypointIndex++;
+            if (approachWaypointIndex >= SOCIETY_APPROACH_PATH.length) {
+                return false;
             }
+            target = SOCIETY_APPROACH_PATH[approachWaypointIndex];
+        }
+        if (ctx.localPlayer().isMoving()) {
+            stats.setStatus("Following Society approach path "
+                    + (approachWaypointIndex + 1) + "/" + SOCIETY_APPROACH_PATH.length
+                    + " to " + tileText(target));
+            Time.sleep(650, 1000);
             return true;
         }
 
-        Time.sleep(700, 1100);
+        stats.setStatus("Walking Society approach path "
+                + (approachWaypointIndex + 1) + "/" + SOCIETY_APPROACH_PATH.length
+                + " to " + tileText(target));
+        Tile pathTarget = target;
+        ctx.walking().walkTo(pathTarget);
+        Time.sleep(800, 1300,
+                () -> pathTarget.tileDistanceTo(ctx) <= 2 || ctx.localPlayer().isMoving(), 100);
         return true;
     }
 

@@ -40,7 +40,7 @@ import java.util.List;
 
 @ScriptManifest(name = "Mixology Profit", gameType = GameType.OS)
 public class MixologyProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.14-all-lab-minimap-fallback";
+    private static final String SCRIPT_VERSION = "v0.2.41-staircase-single-click";
 
     private MixologyStats stats;
     private MixologyPaint paint;
@@ -87,7 +87,6 @@ public class MixologyProfitScript extends Script {
                 recovery,
                 supervisorLalo
         );
-
         List<RuntimeController> runtime = List.of(
                 new MembersWorldController(stats),
                 new LoopWatchdogController(message -> getLogger().info(message), stats, SCRIPT_VERSION),

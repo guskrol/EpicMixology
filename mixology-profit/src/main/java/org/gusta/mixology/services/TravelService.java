@@ -2,7 +2,6 @@ package org.gusta.mixology.services;
 
 import com.epicbot.api.shared.APIContext;
 import com.epicbot.api.shared.entity.SceneObject;
-import com.epicbot.api.shared.model.Area;
 import com.epicbot.api.shared.model.Tile;
 import com.epicbot.api.shared.util.time.Time;
 import org.gusta.mixology.config.MixologySettings;
@@ -50,7 +49,6 @@ public class TravelService {
 
     private final MixologySettings settings;
     private final MixologyStats stats;
-    private final MinigameTeleportService minigameTeleport;
     private final CharterShipService charterShip;
     private final SocietyEntranceService societyEntrance;
     private long nextFallbackLogAt;
@@ -59,7 +57,6 @@ public class TravelService {
     public TravelService(MixologySettings settings, MixologyStats stats) {
         this.settings = settings;
         this.stats = stats;
-        this.minigameTeleport = new MinigameTeleportService(settings, stats);
         this.charterShip = new CharterShipService(settings, stats);
         this.societyEntrance = new SocietyEntranceService(stats);
     }
@@ -91,9 +88,61 @@ public class TravelService {
         return societyEntrance.isEntranceContext(ctx);
     }
 
-    public boolean goToSociety(APIContext ctx) {
-        Area surfaceArea = settings.societySurfaceArea();
+    public boolean canResumeTravelCheckpoint(APIContext ctx) {
+        return charterShip.canResumeFromCheckpoint(ctx);
+    }
 
+    public boolean isObservedAldarinDockCheckpoint(APIContext ctx) {
+        return charterShip.isObservedAldarinDockCheckpoint(ctx);
+    }
+
+    public boolean completeCheckpointRouteToBank(APIContext ctx) {
+        if (!isInSocietyLabContext(ctx)) {
+            goToSociety(ctx);
+            return false;
+        }
+        if (ctx.bank().isOpen()) {
+            stats.setStatus("Travel checkpoint complete: minigame bank is open");
+            return true;
+        }
+        if (ctx.localPlayer().isMoving() || ctx.localPlayer().isAnimating()) {
+            stats.setStatus("Checkpoint lock: approaching minigame bank");
+            Time.sleep(650, 1000);
+            return false;
+        }
+
+        SceneObject bank = ctx.objects()
+                .query()
+                .nameContains("Bank chest", "Bank")
+                .actions("Bank")
+                .within(settings.alchemicalSocietyArea())
+                .results()
+                .nearest();
+        if (bank != null && bank.isValid()) {
+            if (bank.tileDistanceTo(ctx) > 4) {
+                stats.setStatus("Checkpoint lock: walking to minigame bank " + bank.getLocation());
+                ctx.walking().walkTo(bank.getLocation());
+                Time.sleep(800, 1300,
+                        () -> bank.tileDistanceTo(ctx) <= 4 || ctx.localPlayer().isMoving(), 100);
+                return false;
+            }
+            stats.setStatus("Checkpoint lock: opening minigame bank");
+            bank.interact("Bank");
+            Time.sleep(900, 1500, () -> ctx.bank().isOpen(), 100);
+            return ctx.bank().isOpen();
+        }
+
+        stats.setStatus("Checkpoint lock: locating minigame bank");
+        if (ctx.bank().isReachable()) {
+            ctx.bank().open();
+            Time.sleep(900, 1500, () -> ctx.bank().isOpen(), 100);
+        } else {
+            Time.sleep(700, 1100);
+        }
+        return ctx.bank().isOpen();
+    }
+
+    public boolean goToSociety(APIContext ctx) {
         if (ctx.bank().isOpen()) {
             ctx.bank().close();
             Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
@@ -108,7 +157,7 @@ public class TravelService {
             stats.setStatus("At Alchemical Society lab");
             return true;
         }
-        if (societyEntrance.isWaitingForStaircaseTransition()) {
+        if (societyEntrance.isWaitingForStaircaseTransition(ctx)) {
             stats.setStatus("Waiting for Society lab transition");
             Time.sleep(700, 1100);
             return false;
@@ -128,25 +177,17 @@ public class TravelService {
             return false;
         }
 
-        stats.setStatus("Trying Mastering Mixology minigame teleport");
-        if (minigameTeleport.tryTeleport(ctx)) {
-            return isInSocietyLabContext(ctx) || surfaceArea.contains(ctx.localPlayer().getLocation());
-        }
-
-        stats.setStatus("Minigame teleport unavailable; trying Aldarin charter ship");
+        stats.setStatus("Traveling via Ring of wealth, Trader Stan and Aldarin charter");
         if (charterShip.tryCharterToAldarin(ctx)) {
-            return isInSocietyLabContext(ctx) || surfaceArea.contains(ctx.localPlayer().getLocation());
+            return isInSocietyLabContext(ctx);
         }
 
         long now = System.currentTimeMillis();
         if (now >= nextFallbackLogAt) {
-            stats.setStatus("Fallback: webwalking to Aldarin/Mastering Mixology");
+            stats.setStatus("Waiting to resume Ring of wealth charter route");
             nextFallbackLogAt = now + 45_000L;
         }
-
-        ctx.webWalking().setUseTeleports(true);
-        ctx.webWalking().walkTo(settings.societyCenterTile());
-        Time.sleep(1200, 1800);
+        Time.sleep(700, 1100);
         return false;
     }
 
