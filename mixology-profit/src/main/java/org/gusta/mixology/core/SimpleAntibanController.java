@@ -43,6 +43,7 @@ public class SimpleAntibanController implements RuntimeController {
             logger.accept("[Antiban] Safe multi-client mode: camera nudge only");
             ctx.camera().setYawDeg(randomInt(0, 360));
             ctx.camera().setPitch(randomInt(260, 380));
+            CameraController.restoreMaxZoomAfterCameraNudge(ctx);
             Time.sleep(450, 1000);
             scheduleNextAction(80, 220);
             return;
@@ -53,6 +54,7 @@ public class SimpleAntibanController implements RuntimeController {
             logger.accept("[Antiban] Camera nudge");
             ctx.camera().setYawDeg(randomInt(0, 360));
             ctx.camera().setPitch(randomInt(260, 380));
+            CameraController.restoreMaxZoomAfterCameraNudge(ctx);
             Time.sleep(450, 1000);
         } else if (roll < 75) {
             logger.accept("[Antiban] Mouse drift");
