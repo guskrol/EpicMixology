@@ -17,6 +17,7 @@ import org.gusta.mixology.stats.MixologyStats;
 
 import java.awt.Point;
 import java.awt.Rectangle;
+import java.awt.event.KeyEvent;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -297,13 +298,101 @@ public class AldariumRewardService {
         return ctx.store().isOpen() || hasMixologyRewardShopWidget(ctx);
     }
 
-    private void closeRewardShop(APIContext ctx) {
-        if (ctx.store().isOpen()) {
-            ctx.store().close();
-        } else {
-            ctx.widgets().closeInterface();
+    private boolean closeRewardShop(APIContext ctx) {
+        if (!isRewardShopOpen(ctx)) {
+            resetRewardShopSelectionState();
+            return true;
         }
-        Time.sleep(500, 900, () -> !isRewardShopOpen(ctx), 100);
+
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            stats.setStatus("Closing Mixology reward shop attempt " + attempt);
+            boolean clicked = clickRewardShopCloseWidget(ctx);
+            if (!clicked && ctx.store().isOpen()) {
+                ctx.store().close();
+            }
+            Time.sleep(350, 600, () -> !isRewardShopOpen(ctx), 100);
+            if (!isRewardShopOpen(ctx)) {
+                resetRewardShopSelectionState();
+                return true;
+            }
+
+            ctx.widgets().closeInterface();
+            Time.sleep(350, 600, () -> !isRewardShopOpen(ctx), 100);
+            if (!isRewardShopOpen(ctx)) {
+                resetRewardShopSelectionState();
+                return true;
+            }
+
+            ctx.keyboard().sendKey(KeyEvent.VK_ESCAPE);
+            Time.sleep(350, 650, () -> !isRewardShopOpen(ctx), 100);
+            if (!isRewardShopOpen(ctx)) {
+                resetRewardShopSelectionState();
+                return true;
+            }
+
+            if (minimapWalkToCloseRewardShop(ctx)) {
+                resetRewardShopSelectionState();
+                return true;
+            }
+        }
+
+        stats.setStatus("Reward shop close failed; retrying before Aldarium banking");
+        logRewardWidgetDiagnostic(ctx);
+        return false;
+    }
+
+    private boolean clickRewardShopCloseWidget(APIContext ctx) {
+        WidgetChild close = findRewardShopCloseWidget(ctx);
+        return close != null
+                && close.isValid()
+                && (close.interact("Close")
+                || close.click()
+                || ctx.mouse().click(close, false));
+    }
+
+    private WidgetChild findRewardShopCloseWidget(APIContext ctx) {
+        Rectangle closeZone = rewardShopCloseZone(ctx);
+        WidgetChild fallback = null;
+        for (WidgetChild widget : ctx.widgets().getAllChildren(widget -> widget != null
+                && widget.isValid()
+                && widgetGroup(widget) == REWARD_SHOP_GROUP
+                && isVisibleWidget(widget))) {
+            if (widgetMentionsClose(widget) || widgetHasAction(widget, "Close")) {
+                return widget;
+            }
+            if (closeZone != null && widgetCenterInBounds(widget, closeZone)) {
+                fallback = widget;
+            }
+        }
+        return fallback;
+    }
+
+    private Rectangle rewardShopCloseZone(APIContext ctx) {
+        Rectangle shop = rewardShopBounds(ctx);
+        if (shop == null || shop.width <= 0 || shop.height <= 0) {
+            return null;
+        }
+        return new Rectangle(shop.x + shop.width - 54, shop.y, 54, 54);
+    }
+
+    private boolean widgetMentionsClose(WidgetChild widget) {
+        String text = (widgetText(widget) + " " + widget.getName()).toLowerCase(Locale.ROOT);
+        return text.contains("close");
+    }
+
+    private boolean minimapWalkToCloseRewardShop(APIContext ctx) {
+        stats.setStatus("Reward shop still open; minimap walk fallback");
+        Tile target = settings.mixingRoomCenterTile();
+        boolean walking = ctx.walking().walkTo(target);
+        Time.sleep(800, 1300,
+                () -> !isRewardShopOpen(ctx)
+                        || ctx.localPlayer().isMoving()
+                        || target.tileDistanceTo(ctx) <= 2,
+                100);
+        return !isRewardShopOpen(ctx) || walking && ctx.localPlayer().isMoving();
+    }
+
+    private void resetRewardShopSelectionState() {
         rewardListScrollsForClaim = 0;
         rewardListScrolledForAldarium = false;
         aldariumSelectionAttempted = false;
