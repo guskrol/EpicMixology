@@ -9,6 +9,7 @@ import org.gusta.mixology.domain.HopperStock;
 import org.gusta.mixology.domain.PasteType;
 import org.gusta.mixology.domain.PotionOrder;
 import org.gusta.mixology.domain.RewardProfit;
+import org.gusta.mixology.services.AldariumRewardService;
 import org.gusta.mixology.services.BankService;
 import org.gusta.mixology.services.HopperService;
 import org.gusta.mixology.services.HopperStockReader;
@@ -30,6 +31,7 @@ import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 
 public class MixologyRunner implements ScriptModule {
+    private static final String ALDARIUM = "Aldarium";
     private static final int MIN_RESTOCK_THRESHOLD = 150;
     private static final int MAX_RESTOCK_THRESHOLD = 300;
     private static final int CRITICAL_RESTOCK_THRESHOLD = 200;
@@ -37,6 +39,8 @@ public class MixologyRunner implements ScriptModule {
     private static final int MAX_CARRIED_POTION_BANK_ATTEMPTS = 3;
     private static final long HOPPER_STOCK_CACHE_MILLIS = 2_000L;
     private static final long RUNNER_LATENCY_LOG_MILLIS = 2_000L;
+    private static final long RESIN_CHAT_TRIGGER_MAX_AGE_MILLIS = 10 * 60_000L;
+    private static final long ALDARIUM_PRICE_REFRESH_MILLIS = 60 * 60_000L;
 
     private final MixologySettings settings;
     private final MixologyStats stats;
@@ -53,6 +57,7 @@ public class MixologyRunner implements ScriptModule {
     private final OrderCycleService orderCycle;
     private final RecoveryService recovery;
     private final SupervisorLaloService supervisorLalo;
+    private final AldariumRewardService aldariumReward;
 
     private MixologyState state = MixologyState.CHECK_REQUIREMENTS;
     private List<PotionOrder> currentOrders = new ArrayList<>();
@@ -65,12 +70,15 @@ public class MixologyRunner implements ScriptModule {
     private long lastKnownHopperStockAt;
     private long lastRunnerFinishedAt;
     private long mixBasesRequestedAt;
+    private long nextAldariumPriceRefreshAt;
     private int restockThreshold = randomRestockThreshold();
     private boolean travelCheckpointLock;
     private boolean checkpointPurchaseRequired;
     private boolean startupRouteEvaluationComplete;
     private Tile startupLocationCandidate;
     private int startupLocationStableCycles;
+    private MixologyState stateAfterAldariumReward = MixologyState.RETURN_TO_LEVERS;
+    private boolean aldariumSaleCheckedBeforeSupplies;
 
     public MixologyRunner(
             MixologySettings settings,
@@ -87,7 +95,8 @@ public class MixologyRunner implements ScriptModule {
             OrderReader orderReader,
             OrderCycleService orderCycle,
             RecoveryService recovery,
-            SupervisorLaloService supervisorLalo
+            SupervisorLaloService supervisorLalo,
+            AldariumRewardService aldariumReward
     ) {
         this.settings = settings;
         this.stats = stats;
@@ -104,6 +113,7 @@ public class MixologyRunner implements ScriptModule {
         this.orderCycle = orderCycle;
         this.recovery = recovery;
         this.supervisorLalo = supervisorLalo;
+        this.aldariumReward = aldariumReward;
     }
 
     @Override
@@ -122,6 +132,10 @@ public class MixologyRunner implements ScriptModule {
         try {
             stats.startExperienceIfNeeded(ctx);
             stats.setState(state.name());
+            stats.scanResinVarps(ctx);
+            stats.scanVisibleChatbox(ctx);
+            recordOpenBankSnapshots(ctx);
+            refreshAldariumPrice(ctx);
             logPeriodicSnapshot(ctx);
 
             if (!startupRouteEvaluationComplete && isStartupRouteEvaluationState(state)) {
@@ -157,6 +171,12 @@ public class MixologyRunner implements ScriptModule {
                 return;
             }
 
+            if (shouldStartAldariumRewardCheck(ctx)) {
+                requestAldariumRewardCheck(MixologyState.RETURN_TO_LEVERS,
+                        "Lye resin trigger " + stats.resinBalanceText());
+                return;
+            }
+
             switch (state) {
                 case CHECK_REQUIREMENTS:
                     checkRequirements(ctx);
@@ -172,6 +192,9 @@ public class MixologyRunner implements ScriptModule {
                     return;
                 case TRAVEL_TO_MIXOLOGY:
                     travelToMixology(ctx);
+                    return;
+                case CLAIM_ALDARIUM_REWARD:
+                    claimAldariumReward(ctx);
                     return;
                 case PREPARE_SUPPLIES:
                     prepareSupplies(ctx);
@@ -271,6 +294,10 @@ public class MixologyRunner implements ScriptModule {
     }
 
     private void planProfit(APIContext ctx) {
+        if (!travel.isInMixologyContext(ctx) && !travelLoadout.prepareStartupGear(ctx)) {
+            return;
+        }
+
         Optional<RewardProfit> best = profitPlanner.bestTradeableReward(ctx, herbloreLevel(ctx));
         if (best.isPresent()) {
             RewardProfit profit = best.get();
@@ -299,8 +326,16 @@ public class MixologyRunner implements ScriptModule {
             state = MixologyState.TRAVEL_TO_MIXOLOGY;
             return;
         }
+        if (shouldRunAldariumSaleBeforeSupplies(ctx)) {
+            if (!aldariumReward.sellAldariumBeforeRestock(ctx)) {
+                return;
+            }
+            aldariumSaleCheckedBeforeSupplies = true;
+            stats.setStatus("Aldarium GE sale check complete; continuing supply restock");
+        }
         if (supplyPurchase.ensureStarterSupplies(ctx)) {
             checkpointPurchaseRequired = false;
+            aldariumSaleCheckedBeforeSupplies = false;
             if (travel.isInMixologyContext(ctx)) {
                 stats.setStatus("Minigame bank supplies confirmed; preparing Mixology supplies");
                 state = MixologyState.PREPARE_SUPPLIES;
@@ -311,8 +346,40 @@ public class MixologyRunner implements ScriptModule {
         }
     }
 
+    private boolean shouldRunAldariumSaleBeforeSupplies(APIContext ctx) {
+        if (aldariumSaleCheckedBeforeSupplies || travel.isInMixologyContext(ctx)) {
+            return false;
+        }
+        return restockRequested || ctx.grandExchange().isOpen();
+    }
+
+    private void recordOpenBankSnapshots(APIContext ctx) {
+        stats.scanOpenBankInventory(ctx);
+    }
+
+    private void refreshAldariumPrice(APIContext ctx) {
+        long now = System.currentTimeMillis();
+        if (now < nextAldariumPriceRefreshAt) {
+            return;
+        }
+        int price = profitPlanner.aldariumRealtimePrice(ctx);
+        if (price > 0) {
+            stats.setAldariumUnitPrice(price);
+            stats.debug("Aldarium Wiki price refresh: " + price);
+        }
+        nextAldariumPriceRefreshAt = now + ALDARIUM_PRICE_REFRESH_MILLIS;
+    }
+
     private void prepareLoadout(APIContext ctx) {
+        if (ctx.grandExchange().isOpen() && !aldariumSaleCheckedBeforeSupplies) {
+            if (!aldariumReward.sellAldariumBeforeRestock(ctx)) {
+                return;
+            }
+            aldariumSaleCheckedBeforeSupplies = true;
+            stats.setStatus("Aldarium GE sale check complete; continuing travel loadout");
+        }
         if (travelLoadout.prepareForTravel(ctx)) {
+            aldariumSaleCheckedBeforeSupplies = false;
             state = MixologyState.TRAVEL_TO_MIXOLOGY;
         }
     }
@@ -338,6 +405,42 @@ public class MixologyRunner implements ScriptModule {
             stats.recordTripStarted();
             state = MixologyState.PREPARE_SUPPLIES;
         }
+    }
+
+    private void claimAldariumReward(APIContext ctx) {
+        if (!travel.isAtSociety(ctx)) {
+            stats.setStatus("Aldarium claim skipped outside Society; continuing previous flow");
+            state = stateAfterAldariumReward;
+            return;
+        }
+        if (aldariumReward.claimAldarium(ctx)) {
+            stats.setStatus("Aldarium claim check complete; continuing previous flow");
+            stats.clearPendingAldariumClaim("Aldarium claim service completed");
+            stats.rerollAldariumLyeTrigger("Aldarium claim service completed");
+            state = stateAfterAldariumReward;
+        }
+    }
+
+    private boolean shouldStartAldariumRewardCheck(APIContext ctx) {
+        if (state == MixologyState.CLAIM_ALDARIUM_REWARD
+                || !travel.isAtSociety(ctx)
+                || potionInventory.anyPotionCount(ctx) > 0
+                || (!stats.hasPendingAldariumClaim()
+                && !stats.hasRecentLyeResinAboveAldariumTrigger(RESIN_CHAT_TRIGGER_MAX_AGE_MILLIS))) {
+            return false;
+        }
+        return state == MixologyState.RETURN_TO_LEVERS
+                || state == MixologyState.READ_ORDERS
+                || state == MixologyState.MIX_BASES
+                || state == MixologyState.PREPARE_SUPPLIES;
+    }
+
+    private void requestAldariumRewardCheck(MixologyState nextState, String reason) {
+        stateAfterAldariumReward = nextState;
+        String pendingReason = stats.pendingAldariumClaimText();
+        stats.setStatus("Aldarium claim check queued: "
+                + ("-".equals(pendingReason) ? reason : pendingReason));
+        state = MixologyState.CLAIM_ALDARIUM_REWARD;
     }
 
     private void prepareSupplies(APIContext ctx) {
@@ -376,6 +479,16 @@ public class MixologyRunner implements ScriptModule {
             if (refiner.refineInventory(ctx)) {
                 state = MixologyState.PREPARE_SUPPLIES;
             }
+            return;
+        }
+
+        if (bank.hasAnyPaste(ctx)) {
+            stats.setStatus("Carried paste detected; loading Hopper before banking again");
+            if (ctx.bank().isOpen()) {
+                ctx.bank().close();
+                Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
+            }
+            state = MixologyState.LOAD_HOPPER;
             return;
         }
 
@@ -576,6 +689,11 @@ public class MixologyRunner implements ScriptModule {
         if (shouldRestockFromHopper(ctx)) {
             return;
         }
+        if (shouldStartAldariumRewardCheck(ctx)) {
+            requestAldariumRewardCheck(MixologyState.RETURN_TO_LEVERS,
+                    "post-delivery Lye resin trigger " + stats.resinBalanceText());
+            return;
+        }
         state = MixologyState.MIX_BASES;
         mixBasesRequestedAt = System.currentTimeMillis();
         stats.debug("Mix handoff: orders validated; entering MIX_BASES without waiting for another task cycle");
@@ -721,9 +839,19 @@ public class MixologyRunner implements ScriptModule {
     private void beginGeRestock() {
         supplyPurchase.requestRestock(lastKnownHopperStock);
         travelLoadout.resetForRestock();
+        aldariumReward.resetForRestock();
+        aldariumSaleCheckedBeforeSupplies = false;
         lastKnownHopperStock = null;
         lastKnownHopperStockAt = 0L;
-        stats.setStatus("Skipping Aldarium claim/sale; going directly to GE herb restock");
+        if (stats.hasRecentLyeResinAboveAldariumTrigger(RESIN_CHAT_TRIGGER_MAX_AGE_MILLIS)) {
+            requestAldariumRewardCheck(MixologyState.BUY_SUPPLIES,
+                    "pre-restock " + stats.aldariumTriggerText()
+                            + " " + stats.resinBalanceText());
+            return;
+        }
+        stats.setStatus("Lye resin below Aldarium trigger "
+                + stats.aldariumTriggerText()
+                + "; going directly to GE herb restock");
         state = MixologyState.BUY_SUPPLIES;
     }
 

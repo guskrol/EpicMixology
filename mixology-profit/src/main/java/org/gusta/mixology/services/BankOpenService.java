@@ -7,19 +7,21 @@ import org.gusta.mixology.stats.MixologyStats;
 import java.awt.event.KeyEvent;
 
 public final class BankOpenService {
-    private static final int MAX_OPEN_ATTEMPTS = 3;
+    private static final int MAX_OPEN_ATTEMPTS = 4;
 
     private BankOpenService() {
     }
 
     public static boolean open(APIContext ctx, MixologyStats stats, String status) {
         if (ctx.bank().isOpen()) {
+            stats.scanOpenBankInventory(ctx);
             return true;
         }
 
         for (int attempt = 1; attempt <= MAX_OPEN_ATTEMPTS; attempt++) {
             closeBlockingContext(ctx);
             if (ctx.bank().isOpen()) {
+                stats.scanOpenBankInventory(ctx);
                 return true;
             }
 
@@ -27,6 +29,7 @@ public final class BankOpenService {
             ctx.bank().open();
             Time.sleep(700, 1100, () -> ctx.bank().isOpen() || hasBlockingContext(ctx), 100);
             if (ctx.bank().isOpen()) {
+                stats.scanOpenBankInventory(ctx);
                 return true;
             }
 
@@ -34,10 +37,16 @@ public final class BankOpenService {
                 stats.setStatus("Bank click opened dialogue/menu; closing and retrying");
                 closeBlockingContext(ctx);
                 Time.sleep(250, 450);
+            } else if (attempt < MAX_OPEN_ATTEMPTS) {
+                recoverBankView(ctx, stats, attempt);
             }
         }
 
-        return ctx.bank().isOpen();
+        boolean opened = ctx.bank().isOpen();
+        if (opened) {
+            stats.scanOpenBankInventory(ctx);
+        }
+        return opened;
     }
 
     public static boolean closeBlockingContext(APIContext ctx) {
@@ -72,7 +81,11 @@ public final class BankOpenService {
     private static boolean hasBlockingContext(APIContext ctx) {
         return ctx.menu().isOpen()
                 || ctx.dialogues().isDialogueOpen()
-                || ctx.dialogues().isChatOpen()
                 || ctx.dialogues().canContinue();
+    }
+
+    private static void recoverBankView(APIContext ctx, MixologyStats stats, int attempt) {
+        stats.setStatus("Bank not visible; rotating camera retry " + (attempt + 1));
+        ViewRecovery.recover(ctx, "nearest bank", message -> stats.debug("Bank view recovery: " + message));
     }
 }

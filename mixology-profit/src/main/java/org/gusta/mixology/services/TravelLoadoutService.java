@@ -13,7 +13,6 @@ import org.gusta.mixology.stats.MixologyStats;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Queue;
@@ -69,6 +68,7 @@ public class TravelLoadoutService {
     private boolean bankCheckedForLoadout;
     private boolean geCheckedForExistingOffers;
     private boolean purchasesPlanned;
+    private boolean startupGearPrepared;
     private LoadoutPurchase activePurchase;
     private int offerFailures;
     private long nextBatchCollectAt;
@@ -142,6 +142,48 @@ public class TravelLoadoutService {
         return true;
     }
 
+    public boolean prepareStartupGear(APIContext ctx) {
+        if (startupGearPrepared) {
+            return true;
+        }
+
+        if (ctx.bank().isOpen()) {
+            if (selectedGear == null) {
+                selectGearFromAvailableItems(ctx);
+                stats.debug("Startup gear bank scan: gear=" + selectedGearSummary());
+            }
+            if (withdrawSelectedGear(ctx)) {
+                return false;
+            }
+
+            stats.setStatus("Closing bank to equip random startup gear");
+            ctx.bank().close();
+            Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
+            return false;
+        }
+
+        if (ctx.grandExchange().isOpen()) {
+            ctx.grandExchange().close();
+            Time.sleep(500, 900, () -> !ctx.grandExchange().isOpen(), 100);
+            return false;
+        }
+
+        if (equipSelectedGear(ctx)) {
+            return false;
+        }
+
+        if (selectedGear != null) {
+            startupGearPrepared = true;
+            stats.setStatus("Startup random gear ready: " + selectedGearSummary());
+            return true;
+        }
+
+        if (!openBank(ctx)) {
+            return false;
+        }
+        return false;
+    }
+
     private boolean planMissingPurchases(APIContext ctx) {
         if (!bankCheckedForLoadout) {
             if (!openBank(ctx)) {
@@ -149,10 +191,12 @@ public class TravelLoadoutService {
             }
 
             missingAfterBankCheck.clear();
+            selectGearFromAvailableItems(ctx);
             addMissingLoadoutPurchases(ctx, missingAfterBankCheck);
             bankCheckedForLoadout = true;
             stats.debug("Travel loadout bank scan: row=" + firstBankItem(ctx, TravelItems.CHARGED_RING_OF_WEALTH)
                     + " stamina=" + firstBankItem(ctx, TravelItems.STAMINA_POTIONS)
+                    + " gear=" + selectedGearSummary()
                     + " inventoryCoins=" + ctx.inventory().getCount(true, COINS));
 
             if (missingAfterBankCheck.isEmpty()) {
@@ -299,36 +343,34 @@ public class TravelLoadoutService {
             return;
         }
 
-        int bestIndex = -1;
-        int bestScore = -1;
+        List<Integer> availablePresetIndexes = new ArrayList<>();
         for (int i = 0; i < RANDOM_GEAR_PRESETS.length; i++) {
-            int score = gearAvailabilityScore(ctx, RANDOM_GEAR_PRESETS[i]);
-            if (score > bestScore) {
-                bestScore = score;
-                bestIndex = i;
+            if (gearAvailabilityScore(ctx, RANDOM_GEAR_PRESETS[i]) > 0) {
+                availablePresetIndexes.add(i);
             }
         }
 
-        if (bestScore > 0) {
+        if (!availablePresetIndexes.isEmpty()) {
+            int selectedIndex = availablePresetIndexes.get(
+                    ThreadLocalRandom.current().nextInt(availablePresetIndexes.size()));
             List<GearItem> availableGear = new ArrayList<>();
-            for (GearItem item : RANDOM_GEAR_PRESETS[bestIndex]) {
+            for (GearItem item : RANDOM_GEAR_PRESETS[selectedIndex]) {
                 if (hasEquippedInventoryOrBank(ctx, item.name)) {
                     availableGear.add(item);
                 }
             }
             selectedGear = availableGear.toArray(new GearItem[0]);
             allowOptionalGearPurchases = false;
-            stats.debug("Selected existing travel gear preset index=" + bestIndex
-                    + " availablePieces=" + bestScore + "/" + RANDOM_GEAR_PRESETS[bestIndex].length
+            stats.debug("Selected random existing travel gear preset index=" + selectedIndex
+                    + " availablePieces=" + selectedGear.length + "/" + RANDOM_GEAR_PRESETS[selectedIndex].length
+                    + " gear=" + selectedGearSummary()
                     + "; GE optional gear buy disabled");
             return;
         }
 
-        int index = ThreadLocalRandom.current().nextInt(RANDOM_GEAR_PRESETS.length);
-        selectedGear = Arrays.copyOf(RANDOM_GEAR_PRESETS[index], RANDOM_GEAR_PRESETS[index].length);
-        allowOptionalGearPurchases = true;
-        stats.debug("No existing travel gear found; selected random travel gear preset index=" + index
-                + " for GE purchase");
+        selectedGear = new GearItem[0];
+        allowOptionalGearPurchases = false;
+        stats.debug("No existing travel gear found in bank/inventory/equipment; continuing without random gear");
     }
 
     private int gearAvailabilityScore(APIContext ctx, GearItem[] preset) {
@@ -677,6 +719,10 @@ public class TravelLoadoutService {
             return true;
         }
 
+        if (withdrawSelectedGear(ctx)) {
+            return true;
+        }
+
         return false;
     }
 
@@ -690,6 +736,9 @@ public class TravelLoadoutService {
     private boolean equipInventoryLoadout(APIContext ctx) {
         if (hasChargedRingInInventory(ctx) && !hasChargedRingEquipped(ctx)) {
             return equipFirstMatching(ctx, "Wear", TravelItems.CHARGED_RING_OF_WEALTH);
+        }
+        if (equipSelectedGear(ctx)) {
+            return true;
         }
         return false;
     }
@@ -737,6 +786,46 @@ public class TravelLoadoutService {
         for (GearItem item : selectedGear) {
             if (!hasEquippedItem(ctx, item.name) && hasInventoryItem(ctx, item.name)) {
                 return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean withdrawSelectedGear(APIContext ctx) {
+        if (selectedGear == null || selectedGear.length == 0) {
+            return false;
+        }
+
+        for (GearItem item : selectedGear) {
+            if (hasEquippedItem(ctx, item.name) || hasInventoryItem(ctx, item.name)) {
+                continue;
+            }
+
+            String bankName = firstBankItem(ctx, item.name);
+            if (bankName == null) {
+                continue;
+            }
+
+            stats.setStatus("Withdrawing random travel gear: " + bankName);
+            boolean requested = withdrawOne(ctx, bankName);
+            Time.sleep(500, 900, () -> hasInventoryItem(ctx, item.name), 100);
+            if (!hasInventoryItem(ctx, item.name)) {
+                stats.debug("Random travel gear withdrawal not confirmed: "
+                        + bankName + " requested=" + requested);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private boolean equipSelectedGear(APIContext ctx) {
+        if (!hasUnequippedSelectedGearInInventory(ctx)) {
+            return false;
+        }
+
+        for (GearItem item : selectedGear) {
+            if (!hasEquippedItem(ctx, item.name) && hasInventoryItem(ctx, item.name)) {
+                return equipItem(ctx, item.name, item.action);
             }
         }
         return false;
@@ -862,7 +951,7 @@ public class TravelLoadoutService {
     }
 
     private String selectedGearSummary() {
-        if (selectedGear == null) {
+        if (selectedGear == null || selectedGear.length == 0) {
             return "-";
         }
         List<String> items = new ArrayList<>();
@@ -874,15 +963,6 @@ public class TravelLoadoutService {
 
     private boolean withdrawOne(APIContext ctx, String itemName) {
         return ctx.bank().withdraw(1, itemName) || ctx.bank().withdrawAny(1, itemName);
-    }
-
-    private void selectGearIfNeeded() {
-        if (selectedGear != null) {
-            return;
-        }
-        int index = ThreadLocalRandom.current().nextInt(RANDOM_GEAR_PRESETS.length);
-        selectedGear = RANDOM_GEAR_PRESETS[index];
-        stats.debug("Selected random travel gear preset index=" + index);
     }
 
     private static class GearItem {

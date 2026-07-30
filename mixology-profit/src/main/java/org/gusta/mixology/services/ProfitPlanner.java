@@ -30,6 +30,10 @@ public class ProfitPlanner {
                 .max(Comparator.comparingDouble(RewardProfit::profitPerResin));
     }
 
+    public int aldariumRealtimePrice(APIContext ctx) {
+        return pricing.aldariumRealtimePrice(ctx, fallbackPrice("Aldarium"));
+    }
+
     public Map<PasteType, Long> cheapestPasteCosts(APIContext ctx) {
         Map<PasteType, Long> costs = new EnumMap<>(PasteType.class);
         for (PasteType type : PasteType.values()) {

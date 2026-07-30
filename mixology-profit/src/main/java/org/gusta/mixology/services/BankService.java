@@ -393,20 +393,57 @@ public class BankService {
                     + type.pasteName()
                     + " cap=" + MixologySettings.MAX_HOPPER_PASTE_PER_TYPE
                     + " current=" + (currentHopperAmount < 0 ? "unknown" : currentHopperAmount));
-            if (ctx.bank().withdraw(quantity, type.pasteName())) {
+            if (withdrawFinalHopperPaste(ctx, type, quantity, bankCount)) {
                 withdrewPaste = true;
-                Time.sleep(400, 700);
             }
         }
 
-        if (withdrewPaste && hasAnyPaste(ctx)) {
+        int inventoryPaste = totalInventoryPaste(ctx);
+        if ((withdrewPaste || inventoryPaste > 0) && inventoryPaste > 0) {
             ctx.bank().close();
             Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
             return true;
         }
 
+        if (hasAnyBankPaste(ctx)) {
+            stats.setStatus("Stored paste found, but withdrawal was not confirmed; retrying");
+            return false;
+        }
+
         stats.setStatus("No stored paste found for Hopper");
         return false;
+    }
+
+    private boolean withdrawFinalHopperPaste(APIContext ctx, PasteType type, int quantity, int bankCount) {
+        String pasteName = type.pasteName();
+        int before = countInventoryItem(ctx, pasteName);
+        boolean requested = ctx.bank().withdraw(quantity, pasteName);
+        Time.sleep(700, 1200, () -> countInventoryItem(ctx, pasteName) > before, 100);
+        if (countInventoryItem(ctx, pasteName) > before) {
+            return true;
+        }
+
+        stats.debug("Exact Hopper paste withdrawal not confirmed: "
+                + pasteName
+                + " quantity=" + quantity
+                + " bankCount=" + bankCount
+                + " requested=" + requested
+                + " inventoryBefore=" + before);
+
+        int fallbackBefore = countInventoryItem(ctx, pasteName);
+        stats.setStatus("Final Hopper load fallback: withdrawing all " + pasteName);
+        boolean fallbackRequested = ctx.bank().withdrawAll(pasteName)
+                || (bankCount > 0 && ctx.bank().withdraw(bankCount, pasteName));
+        Time.sleep(700, 1200, () -> countInventoryItem(ctx, pasteName) > fallbackBefore, 100);
+        boolean confirmed = countInventoryItem(ctx, pasteName) > fallbackBefore;
+        if (!confirmed) {
+            stats.debug("Fallback Hopper paste withdrawal not confirmed: "
+                    + pasteName
+                    + " bankCount=" + bankCount
+                    + " requested=" + fallbackRequested
+                    + " inventoryBefore=" + fallbackBefore);
+        }
+        return confirmed;
     }
 
     public boolean inventoryCanCoverOrders(APIContext ctx, List<PotionOrder> orders) {
@@ -592,6 +629,13 @@ public class BankService {
 
     private boolean openBank(APIContext ctx) {
         if (ctx.bank().isOpen()) {
+            stats.scanOpenBankInventory(ctx);
+            return true;
+        }
+
+        BankOpenService.closeBlockingContext(ctx);
+        if (ctx.bank().isOpen()) {
+            stats.scanOpenBankInventory(ctx);
             return true;
         }
 
@@ -599,14 +643,19 @@ public class BankService {
                 new String[]{"Bank chest", "Bank"}, "Bank")) {
             Time.sleep(900, 1500, () -> ctx.bank().isOpen()
                     || ctx.dialogues().isDialogueOpen()
-                    || ctx.dialogues().isChatOpen()
+                    || ctx.menu().isOpen()
                     || ctx.dialogues().canContinue(), 100);
             if (ctx.bank().isOpen()) {
+                stats.scanOpenBankInventory(ctx);
                 return true;
             }
             BankOpenService.closeBlockingContext(ctx);
         }
 
-        return BankOpenService.open(ctx, stats, "Opening nearest bank");
+        boolean opened = BankOpenService.open(ctx, stats, "Opening nearest bank");
+        if (opened) {
+            stats.scanOpenBankInventory(ctx);
+        }
+        return opened;
     }
 }
