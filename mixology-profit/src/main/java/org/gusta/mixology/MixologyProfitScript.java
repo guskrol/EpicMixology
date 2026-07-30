@@ -41,8 +41,8 @@ import java.util.List;
 
 @ScriptManifest(name = "Mixology Profit", gameType = GameType.OS)
 public class MixologyProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.66";
-    private static final String SCRIPT_UPDATE_NOTE = "Wiki price + bank view recovery";
+    private static final String SCRIPT_VERSION = "v0.2.67";
+    private static final String SCRIPT_UPDATE_NOTE = "Noted Aldarium GE withdraw";
 
     private MixologyStats stats;
     private MixologyPaint paint;

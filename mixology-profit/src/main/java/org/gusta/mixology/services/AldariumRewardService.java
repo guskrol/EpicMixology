@@ -6,6 +6,7 @@ import com.epicbot.api.shared.entity.ItemWidget;
 import com.epicbot.api.shared.entity.NPC;
 import com.epicbot.api.shared.entity.WidgetChild;
 import com.epicbot.api.shared.methods.IEquipmentAPI;
+import com.epicbot.api.shared.methods.IBankAPI;
 import com.epicbot.api.shared.model.Tile;
 import com.epicbot.api.shared.model.ge.GrandExchangeOffer;
 import com.epicbot.api.shared.model.ge.GrandExchangeSlot;
@@ -594,12 +595,26 @@ public class AldariumRewardService {
             return false;
         }
 
-        stats.setStatus("Withdrawing " + bankCount + "x Aldarium for GE sale");
+        if (!ctx.bank().isWithdrawMode(IBankAPI.WithdrawMode.NOTE)) {
+            stats.setStatus("Selecting noted withdraw mode for Aldarium sale");
+            ctx.bank().selectWithdrawMode(IBankAPI.WithdrawMode.NOTE);
+            Time.sleep(600, 900, () -> ctx.bank().isWithdrawMode(IBankAPI.WithdrawMode.NOTE), 100);
+        }
+        if (!ctx.bank().isWithdrawMode(IBankAPI.WithdrawMode.NOTE)) {
+            stats.setStatus("Could not select noted mode for Aldarium sale; retrying");
+            return false;
+        }
+
+        stats.setStatus("Withdrawing " + bankCount + "x noted Aldarium for GE sale");
         if (ctx.bank().withdrawAll(ALDARIUM)
                 || ctx.bank().withdraw(Math.max(1, bankCount), ALDARIUM)) {
             Time.sleep(500, 900, () -> inventoryCount(ctx, ALDARIUM) > 0, 100);
             stats.recordBankedAldarium(bankCount(ctx, ALDARIUM),
                     "withdrew Aldarium for GE sale");
+        }
+        if (ctx.bank().isWithdrawMode(IBankAPI.WithdrawMode.NOTE)) {
+            ctx.bank().selectWithdrawMode(IBankAPI.WithdrawMode.ITEM);
+            Time.sleep(400, 700, () -> ctx.bank().isWithdrawMode(IBankAPI.WithdrawMode.ITEM), 100);
         }
         ctx.bank().close();
         Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
