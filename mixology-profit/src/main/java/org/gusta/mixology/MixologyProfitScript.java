@@ -41,8 +41,8 @@ import java.util.List;
 
 @ScriptManifest(name = "Mixology Profit", gameType = GameType.OS)
 public class MixologyProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.72";
-    private static final String SCRIPT_UPDATE_NOTE = "Aldarium ignores carried potions";
+    private static final String SCRIPT_VERSION = "v0.2.73";
+    private static final String SCRIPT_UPDATE_NOTE = "Bank herbs before Hopper";
 
     private MixologyStats stats;
     private MixologyPaint paint;

@@ -490,6 +490,23 @@ public class MixologyRunner implements ScriptModule {
             return;
         }
 
+        if (!bulkStockingComplete) {
+            if (bank.prepareNextHerbBatch(ctx)) {
+                state = MixologyState.PREPARE_SUPPLIES;
+                return;
+            }
+            if (!ctx.bank().isOpen() && bank.hasAnyPaste(ctx)) {
+                stats.setStatus("Waiting for bank herb check before Hopper load");
+                Time.sleep(800, 1300);
+                return;
+            }
+            if (ctx.bank().isOpen() && bank.hasAnyBankHerb(ctx)) {
+                stats.setStatus("Bank still has herbs; retrying herb batch before Hopper load");
+                Time.sleep(800, 1300);
+                return;
+            }
+        }
+
         if (bank.hasAnyPaste(ctx)) {
             stats.setStatus("Carried paste detected; loading Hopper before banking again");
             if (ctx.bank().isOpen()) {
@@ -497,11 +514,6 @@ public class MixologyRunner implements ScriptModule {
                 Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
             }
             state = MixologyState.LOAD_HOPPER;
-            return;
-        }
-
-        if (!bulkStockingComplete && bank.prepareNextHerbBatch(ctx)) {
-            state = MixologyState.PREPARE_SUPPLIES;
             return;
         }
 
