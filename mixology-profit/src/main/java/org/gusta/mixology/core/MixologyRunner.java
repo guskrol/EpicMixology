@@ -166,7 +166,8 @@ public class MixologyRunner implements ScriptModule {
                 }
             }
 
-            if (recovery.clearBlockingState(ctx, state != MixologyState.BUY_SUPPLIES
+            if (recovery.clearBlockingState(ctx, state != MixologyState.PLAN_PROFIT
+                    && state != MixologyState.BUY_SUPPLIES
                     && state != MixologyState.PREPARE_LOADOUT)) {
                 return;
             }
@@ -294,6 +295,14 @@ public class MixologyRunner implements ScriptModule {
     }
 
     private void planProfit(APIContext ctx) {
+        if (!travel.isInMixologyContext(ctx) && !aldariumSaleCheckedBeforeSupplies) {
+            if (!aldariumReward.sellAldariumBeforeRestock(ctx)) {
+                return;
+            }
+            aldariumSaleCheckedBeforeSupplies = true;
+            stats.setStatus("Aldarium GE sale check complete; preparing startup gear");
+        }
+
         if (!travel.isInMixologyContext(ctx) && !travelLoadout.prepareStartupGear(ctx)) {
             return;
         }

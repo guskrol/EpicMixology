@@ -41,8 +41,8 @@ import java.util.List;
 
 @ScriptManifest(name = "Mixology Profit", gameType = GameType.OS)
 public class MixologyProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.68";
-    private static final String SCRIPT_UPDATE_NOTE = "Reward close minimap fallback";
+    private static final String SCRIPT_VERSION = "v0.2.71";
+    private static final String SCRIPT_UPDATE_NOTE = "Plan profit keeps GE open";
 
     private MixologyStats stats;
     private MixologyPaint paint;

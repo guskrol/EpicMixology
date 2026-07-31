@@ -171,11 +171,6 @@ public class AldariumRewardService {
             return false;
         }
 
-        GrandExchangeSlot activeSlot = findAldariumOffer(ctx);
-        if (activeSlot != null || sellOfferPlaced) {
-            return handleExistingSellOffer(ctx, activeSlot);
-        }
-
         int inventoryAldarium = inventoryCount(ctx, ALDARIUM);
         if (inventoryAldarium <= 0 && !bankCheckedForAldarium) {
             return withdrawAldariumFromBank(ctx);
@@ -183,8 +178,14 @@ public class AldariumRewardService {
         if (inventoryAldarium <= 0 && !geCheckedForAldariumOffer) {
             return checkGrandExchangeForAldariumBeforeHerbs(ctx);
         }
+
+        GrandExchangeSlot activeSlot = findAldariumOffer(ctx);
+        if (activeSlot != null || sellOfferPlaced) {
+            return handleExistingSellOffer(ctx, activeSlot);
+        }
+
         if (inventoryAldarium <= 0) {
-            stats.setStatus("No Aldarium to sell before restock");
+            stats.setStatus("Aldarium sale audit clear before restock");
             return true;
         }
 
@@ -215,9 +216,9 @@ public class AldariumRewardService {
 
         inventoryAldarium = inventoryCount(ctx, ALDARIUM);
         if (inventoryAldarium <= 0) {
-            stats.recordBankedAldarium(0, "Aldarium GE sale already collected");
-            stats.setStatus("Aldarium sale already collected");
-            return true;
+            bankCheckedForAldarium = false;
+            stats.setStatus("Aldarium inventory empty after GE collect; rechecking bank before restock");
+            return false;
         }
 
         currentSellPrice = Math.max(1, pricing.aldariumRealtimePrice(ctx, 6_000L));
@@ -674,15 +675,18 @@ public class AldariumRewardService {
             return false;
         }
 
-        bankCheckedForAldarium = true;
         int bankCount = bankCount(ctx, ALDARIUM);
         stats.recordBankedAldarium(bankCount, "GE restock bank check");
         if (bankCount <= 0 && !ctx.bank().contains(ALDARIUM)) {
+            bankCheckedForAldarium = true;
             stats.setStatus("No banked Aldarium before restock");
             ctx.bank().close();
             Time.sleep(500, 900);
             return false;
         }
+
+        bankCheckedForAldarium = false;
+        geCheckedForAldariumOffer = false;
 
         if (!ctx.bank().isWithdrawMode(IBankAPI.WithdrawMode.NOTE)) {
             stats.setStatus("Selecting noted withdraw mode for Aldarium sale");
@@ -695,12 +699,22 @@ public class AldariumRewardService {
         }
 
         stats.setStatus("Withdrawing " + bankCount + "x noted Aldarium for GE sale");
-        if (ctx.bank().withdrawAll(ALDARIUM)
-                || ctx.bank().withdraw(Math.max(1, bankCount), ALDARIUM)) {
+        boolean withdrew = ctx.bank().withdrawAll(ALDARIUM)
+                || ctx.bank().withdraw(Math.max(1, bankCount), ALDARIUM);
+        if (withdrew) {
             Time.sleep(500, 900, () -> inventoryCount(ctx, ALDARIUM) > 0, 100);
-            stats.recordBankedAldarium(bankCount(ctx, ALDARIUM),
-                    "withdrew Aldarium for GE sale");
         }
+        int inventoryAfterWithdraw = inventoryCount(ctx, ALDARIUM);
+        int bankAfterWithdraw = bankCount(ctx, ALDARIUM);
+        stats.recordBankedAldarium(bankAfterWithdraw, "withdrew Aldarium for GE sale");
+        if (!withdrew || inventoryAfterWithdraw <= 0) {
+            bankCheckedForAldarium = false;
+            stats.setStatus("Aldarium noted withdraw not confirmed; retrying bank scan"
+                    + " bank=" + bankAfterWithdraw
+                    + " inventory=" + inventoryAfterWithdraw);
+            return false;
+        }
+        bankCheckedForAldarium = bankAfterWithdraw <= 0;
         if (ctx.bank().isWithdrawMode(IBankAPI.WithdrawMode.NOTE)) {
             ctx.bank().selectWithdrawMode(IBankAPI.WithdrawMode.ITEM);
             Time.sleep(400, 700, () -> ctx.bank().isWithdrawMode(IBankAPI.WithdrawMode.ITEM), 100);
@@ -733,9 +747,9 @@ public class AldariumRewardService {
             collectGeToBank(ctx);
             sellOfferPlaced = false;
             geCheckedForAldariumOffer = true;
-            stats.recordBankedAldarium(0, "Aldarium GE sale complete");
-            stats.setStatus("Aldarium sell offer complete");
-            return true;
+            bankCheckedForAldarium = false;
+            stats.setStatus("Aldarium GE offer clear; auditing bank before restock");
+            return false;
         }
 
         if (slot.isCompleted() || slot.canCollect()) {
@@ -745,8 +759,9 @@ public class AldariumRewardService {
             if (findAldariumOffer(ctx) == null) {
                 sellOfferPlaced = false;
                 geCheckedForAldariumOffer = true;
-                stats.recordBankedAldarium(0, "Aldarium GE sale collected");
-                return true;
+                bankCheckedForAldarium = false;
+                stats.setStatus("Aldarium sale collected; auditing bank before restock");
+                return false;
             }
             return false;
         }
