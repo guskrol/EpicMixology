@@ -433,7 +433,6 @@ public class MixologyRunner implements ScriptModule {
     private boolean shouldStartAldariumRewardCheck(APIContext ctx) {
         if (state == MixologyState.CLAIM_ALDARIUM_REWARD
                 || !travel.isAtSociety(ctx)
-                || potionInventory.anyPotionCount(ctx) > 0
                 || (!stats.hasPendingAldariumClaim()
                 && !stats.hasRecentLyeResinAboveAldariumTrigger(RESIN_CHAT_TRIGGER_MAX_AGE_MILLIS))) {
             return false;
