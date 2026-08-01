@@ -672,7 +672,7 @@ public class MixologyStats {
             if (item == null || !itemNameMatches(item.getName(), itemName)) {
                 continue;
             }
-            total += Math.max(1, item.getStackSize());
+            total += Math.max(0, item.getStackSize());
         }
 
         int apiCount = 0;

@@ -677,7 +677,7 @@ public class AldariumRewardService {
 
         int bankCount = bankCount(ctx, ALDARIUM);
         stats.recordBankedAldarium(bankCount, "GE restock bank check");
-        if (bankCount <= 0 && !ctx.bank().contains(ALDARIUM)) {
+        if (bankCount <= 0) {
             bankCheckedForAldarium = true;
             stats.setStatus("No banked Aldarium before restock");
             ctx.bank().close();
@@ -1225,7 +1225,7 @@ public class AldariumRewardService {
         int total = 0;
         for (ItemWidget item : ctx.bank().getItems()) {
             if (item != null && itemNameMatches(item.getName(), itemName)) {
-                total += Math.max(1, item.getStackSize());
+                total += Math.max(0, item.getStackSize());
             }
         }
 
