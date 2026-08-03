@@ -11,9 +11,11 @@ import java.util.Arrays;
 
 public class ObjectService {
     private static final int MAX_DIRECT_OBJECT_INTERACT_DISTANCE = 4;
+    private static final long VIEW_RECOVERY_THROTTLE_MILLIS = 8_000L;
 
     private final MixologyStats stats;
     private long nextMissingObjectDiagnosticAt;
+    private long nextViewRecoveryAt;
 
     public ObjectService(MixologyStats stats) {
         this.stats = stats;
@@ -73,6 +75,7 @@ public class ObjectService {
         if (object == null || !object.isValid()) {
             stats.setStatus("Missing object: " + Arrays.toString(names));
             logNearbyObjects(ctx, area, names, actions);
+            recoverMissingObjectView(ctx, names);
             Time.sleep(900, 1300);
             return false;
         }
@@ -106,6 +109,7 @@ public class ObjectService {
         if (object == null || !object.isValid()) {
             stats.setStatus("Missing object id=" + id + " label=" + label);
             logNearbyObjects(ctx, area, new String[]{label, "id=" + id}, actions);
+            recoverMissingObjectView(ctx, new String[]{label});
             Time.sleep(900, 1300);
             return false;
         }
@@ -237,6 +241,7 @@ public class ObjectService {
                     + " label=" + label
                     + " tile=" + tileText(objectTile));
             logNearbyObjects(ctx, area, new String[]{label, "id=" + id, "tile=" + tileText(objectTile)}, actions);
+            recoverMissingObjectView(ctx, new String[]{label});
             Time.sleep(900, 1300);
             return false;
         }
@@ -384,6 +389,18 @@ public class ObjectService {
                 + " actions=" + Arrays.toString(actions)
                 + " playerLoc=" + ctx.localPlayer().getLocation()
                 + " nearbyObjects=" + nearby);
+    }
+
+    private void recoverMissingObjectView(APIContext ctx, String[] names) {
+        long now = System.currentTimeMillis();
+        if (now < nextViewRecoveryAt) {
+            return;
+        }
+        nextViewRecoveryAt = now + VIEW_RECOVERY_THROTTLE_MILLIS;
+
+        String target = names == null || names.length == 0 ? "scene object" : Arrays.toString(names);
+        stats.setStatus("Recovering camera to find " + target);
+        ViewRecovery.recover(ctx, target, message -> stats.debug("Object view recovery: " + message));
     }
 
     private int tileDistance(Tile a, Tile b) {

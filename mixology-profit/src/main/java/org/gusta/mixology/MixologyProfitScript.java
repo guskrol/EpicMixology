@@ -16,6 +16,7 @@ import org.gusta.mixology.core.RuntimeController;
 import org.gusta.mixology.core.SimpleAntibanController;
 import org.gusta.mixology.core.StaminaController;
 import org.gusta.mixology.services.BankService;
+import org.gusta.mixology.services.AldariumRewardService;
 import org.gusta.mixology.services.ConveyorService;
 import org.gusta.mixology.services.GePricingService;
 import org.gusta.mixology.services.HopperService;
@@ -40,7 +41,8 @@ import java.util.List;
 
 @ScriptManifest(name = "Mixology Profit", gameType = GameType.OS)
 public class MixologyProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.41-staircase-single-click";
+    private static final String SCRIPT_VERSION = "v0.2.77";
+    private static final String SCRIPT_UPDATE_NOTE = "Stamina loadout buy at 5k";
 
     private MixologyStats stats;
     private MixologyPaint paint;
@@ -48,7 +50,7 @@ public class MixologyProfitScript extends Script {
     @Override
     public boolean onStart(String... args) {
         stats = new MixologyStats(message -> getLogger().info(message));
-        paint = new MixologyPaint(SCRIPT_VERSION);
+        paint = new MixologyPaint(SCRIPT_VERSION, SCRIPT_UPDATE_NOTE);
 
         MixologySettings settings = new MixologySettings();
         ObjectService objects = new ObjectService(stats);
@@ -69,6 +71,7 @@ public class MixologyProfitScript extends Script {
         OrderCycleService orderCycle = new OrderCycleService(mixer, processing, conveyor, bank, stats, potionInventory);
         RecoveryService recovery = new RecoveryService(stats);
         SupervisorLaloService supervisorLalo = new SupervisorLaloService(stats);
+        AldariumRewardService aldariumReward = new AldariumRewardService(settings, stats, pricing);
 
         MixologyRunner runner = new MixologyRunner(
                 settings,
@@ -85,13 +88,14 @@ public class MixologyProfitScript extends Script {
                 orderReader,
                 orderCycle,
                 recovery,
-                supervisorLalo
+                supervisorLalo,
+                aldariumReward
         );
         List<RuntimeController> runtime = List.of(
+                new CameraController(this::logInfo),
                 new MembersWorldController(stats),
                 new LoopWatchdogController(message -> getLogger().info(message), stats, SCRIPT_VERSION),
                 new StaminaController(stats),
-                new CameraController(this::logInfo),
                 new SimpleAntibanController(this::logInfo, true)
         );
 

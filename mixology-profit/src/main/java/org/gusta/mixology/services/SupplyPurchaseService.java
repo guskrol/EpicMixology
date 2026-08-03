@@ -126,8 +126,7 @@ public class SupplyPurchaseService {
                 Time.sleep(1000, 1600);
                 return true;
             }
-            ctx.bank().open();
-            Time.sleep(1000, 1600, () -> ctx.bank().isOpen(), 100);
+            BankOpenService.open(ctx, stats, "Checking bank for existing Mixology supplies");
             return true;
         }
 

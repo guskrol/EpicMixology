@@ -526,6 +526,12 @@ public class CharterShipService {
             Time.sleep(900, 1500);
             return true;
         }
+        if ((charterContext || dialogueContext) && hasYesAndDontAskAgainOption(ctx)) {
+            stats.setStatus("Confirming Aldarin charter: Yes, and don't ask again");
+            ctx.dialogues().selectOption(this::isYesAndDontAskAgainOption);
+            Time.sleep(900, 1500);
+            return true;
+        }
         if ((charterContext || dialogueContext) && ctx.dialogues().hasOptionContaining("Yes")) {
             stats.setStatus("Confirming Aldarin charter");
             ctx.dialogues().selectOption(text -> text != null
@@ -551,6 +557,31 @@ public class CharterShipService {
             return true;
         }
         return false;
+    }
+
+    private boolean hasYesAndDontAskAgainOption(APIContext ctx) {
+        List<WidgetChild> options = ctx.dialogues().getOptions();
+        if (options == null || options.isEmpty()) {
+            return false;
+        }
+        for (WidgetChild option : options) {
+            if (option == null) {
+                continue;
+            }
+            String text = widgetText(option);
+            if (isYesAndDontAskAgainOption(text)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isYesAndDontAskAgainOption(String text) {
+        String normalized = normalize(text);
+        return normalized.contains("yes")
+                && normalized.contains("don")
+                && normalized.contains("ask")
+                && normalized.contains("again");
     }
 
     private boolean waitForPendingAldarinTravel(APIContext ctx) {

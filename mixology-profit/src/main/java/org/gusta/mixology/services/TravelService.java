@@ -10,6 +10,7 @@ import org.gusta.mixology.stats.MixologyStats;
 import java.util.Arrays;
 
 public class TravelService {
+    private static final int LEVER_RETURN_ACCEPT_DISTANCE = 1;
     private static final String[] MIXOLOGY_ROOM_OBJECT_NAMES = {
             "Hopper",
             "Mixing vessel",
@@ -129,15 +130,18 @@ public class TravelService {
             stats.setStatus("Checkpoint lock: opening minigame bank");
             bank.interact("Bank");
             Time.sleep(900, 1500, () -> ctx.bank().isOpen(), 100);
+            if (!ctx.bank().isOpen()) {
+                stats.setStatus("Checkpoint bank did not open; rotating camera");
+                ViewRecovery.recover(ctx, bank, "minigame bank", message -> stats.debug("Bank view recovery: " + message));
+            }
             return ctx.bank().isOpen();
         }
 
         stats.setStatus("Checkpoint lock: locating minigame bank");
         if (ctx.bank().isReachable()) {
-            ctx.bank().open();
-            Time.sleep(900, 1500, () -> ctx.bank().isOpen(), 100);
+            BankOpenService.open(ctx, stats, "Checkpoint lock: opening reachable bank");
         } else {
-            Time.sleep(700, 1100);
+            ViewRecovery.recover(ctx, "minigame bank", message -> stats.debug("Bank view recovery: " + message));
         }
         return ctx.bank().isOpen();
     }
@@ -258,7 +262,8 @@ public class TravelService {
 
     public boolean moveToMixingRoomCenter(APIContext ctx, String reason) {
         if (isAtLeverCenterTile(ctx)) {
-            stats.setStatus(reason + ": already on lever work tile");
+            stats.setStatus(reason + ": already near lever work tile "
+                    + tileText(ctx.localPlayer().getLocation()));
             return true;
         }
 
@@ -325,7 +330,7 @@ public class TravelService {
             return false;
         }
         for (Tile tile : settings.leverReturnTiles()) {
-            if (isSameTile(playerTile, tile)) {
+            if (tileDistance(playerTile, tile) <= LEVER_RETURN_ACCEPT_DISTANCE) {
                 return true;
             }
         }
@@ -344,6 +349,13 @@ public class TravelService {
                 && left.getX() == right.getX()
                 && left.getY() == right.getY()
                 && left.getPlane() == right.getPlane();
+    }
+
+    private int tileDistance(Tile left, Tile right) {
+        if (left == null || right == null || left.getPlane() != right.getPlane()) {
+            return Integer.MAX_VALUE;
+        }
+        return Math.max(Math.abs(left.getX() - right.getX()), Math.abs(left.getY() - right.getY()));
     }
 
     private Tile nearestLeverReturnTile(APIContext ctx) {
