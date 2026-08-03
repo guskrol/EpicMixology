@@ -41,8 +41,8 @@ import java.util.List;
 
 @ScriptManifest(name = "Mixology Profit", gameType = GameType.OS)
 public class MixologyProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.74";
-    private static final String SCRIPT_UPDATE_NOTE = "Ignore Aldarium bank placeholders";
+    private static final String SCRIPT_VERSION = "v0.2.77";
+    private static final String SCRIPT_UPDATE_NOTE = "Stamina loadout buy at 5k";
 
     private MixologyStats stats;
     private MixologyPaint paint;

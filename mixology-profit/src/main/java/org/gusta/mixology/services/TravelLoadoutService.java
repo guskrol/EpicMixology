@@ -28,6 +28,7 @@ public class TravelLoadoutService {
     private static final int GE_SLOT_BATCH_SIZE = 8;
     private static final String COINS = "Coins";
     private static final int CHARTER_COINS = 3_100;
+    private static final int STAMINA_ONE_DOSE_BUY_PRICE = 5_000;
 
     private static final GearItem[][] RANDOM_GEAR_PRESETS = {
             {
@@ -71,6 +72,7 @@ public class TravelLoadoutService {
     private boolean startupGearPrepared;
     private LoadoutPurchase activePurchase;
     private int offerFailures;
+    private long activePurchaseConfirmUntil;
     private long nextBatchCollectAt;
 
     public TravelLoadoutService(MixologyStats stats, GePricingService pricing) {
@@ -87,6 +89,7 @@ public class TravelLoadoutService {
         missingAfterBankCheck.clear();
         activePurchase = null;
         offerFailures = 0;
+        activePurchaseConfirmUntil = 0L;
         nextBatchCollectAt = 0L;
     }
 
@@ -264,7 +267,7 @@ public class TravelLoadoutService {
             missing.add(new LoadoutPurchase(
                     TravelItems.STAMINA_BUY,
                     1,
-                    loadoutBuyPrice(ctx, TravelItems.STAMINA_BUY, 15_000),
+                    STAMINA_ONE_DOSE_BUY_PRICE,
                     true
             ));
         }
@@ -425,6 +428,9 @@ public class TravelLoadoutService {
             return false;
         }
         if (confirmHighPriceWarning(ctx)) {
+            if (activePurchase != null) {
+                activePurchaseConfirmUntil = System.currentTimeMillis() + 5_000L;
+            }
             return false;
         }
 
@@ -436,6 +442,7 @@ public class TravelLoadoutService {
         if (activePurchase == null) {
             activePurchase = pendingPurchases.poll();
             offerFailures = 0;
+            activePurchaseConfirmUntil = 0L;
             if (activePurchase == null) {
                 if (!placedBatch.isEmpty()) {
                     collectLoadoutBatch(ctx);
@@ -455,7 +462,13 @@ public class TravelLoadoutService {
                     + activePurchase.itemName + " slot=" + existingSlot.getIndex());
             activePurchase = null;
             offerFailures = 0;
+            activePurchaseConfirmUntil = 0L;
             nextBatchCollectAt = System.currentTimeMillis() + 2_500L;
+            return false;
+        }
+        if (activePurchaseConfirmUntil > System.currentTimeMillis()) {
+            stats.setStatus("Waiting to confirm GE loadout offer: " + activePurchase.itemName);
+            Time.sleep(700, 1000);
             return false;
         }
 
@@ -467,18 +480,33 @@ public class TravelLoadoutService {
                 activePurchase.unitPrice
         );
         Time.sleep(1000, 1500);
+        if (confirmHighPriceWarning(ctx)) {
+            activePurchaseConfirmUntil = System.currentTimeMillis() + 5_000L;
+            return false;
+        }
+
+        GrandExchangeSlot confirmedSlot = findActiveSlot(ctx, activePurchase.itemName);
         if (!placed) {
-            if (confirmHighPriceWarning(ctx)) {
+            if (confirmedSlot != null) {
+                placed = true;
+            } else {
+                offerFailures++;
+                stats.setStatus("GE loadout offer was not placed for " + activePurchase.itemName
+                        + " attempt=" + offerFailures);
+                if (!activePurchase.mandatory && offerFailures >= 3) {
+                    stats.setStatus("Skipping optional random gear item: " + activePurchase.itemName);
+                    activePurchase = null;
+                    offerFailures = 0;
+                    activePurchaseConfirmUntil = 0L;
+                }
                 return false;
             }
-            offerFailures++;
-            stats.setStatus("GE loadout offer was not placed for " + activePurchase.itemName
-                    + " attempt=" + offerFailures);
-            if (!activePurchase.mandatory && offerFailures >= 3) {
-                stats.setStatus("Skipping optional random gear item: " + activePurchase.itemName);
-                activePurchase = null;
-                offerFailures = 0;
-            }
+        }
+
+        if (confirmedSlot == null) {
+            activePurchaseConfirmUntil = System.currentTimeMillis() + 3_000L;
+            stats.setStatus("GE accepted loadout offer; waiting for slot confirmation: "
+                    + activePurchase.itemName);
             return false;
         }
 
@@ -487,6 +515,7 @@ public class TravelLoadoutService {
                 + "/" + GE_SLOT_BATCH_SIZE + ": " + activePurchase.itemName);
         activePurchase = null;
         offerFailures = 0;
+        activePurchaseConfirmUntil = 0L;
         nextBatchCollectAt = System.currentTimeMillis() + 2_500L;
         return false;
     }
@@ -503,16 +532,14 @@ public class TravelLoadoutService {
     }
 
     private boolean confirmHighPriceWarning(APIContext ctx) {
-        WidgetChild confirm = ctx.widgets().query()
-                .textContains("Yes")
-                .results()
-                .first();
-        if (confirm == null || !confirm.isValid()) {
+        if (!isHighPriceWarningOpen(ctx)) {
             return false;
         }
 
-        String allText = allWidgetText(ctx).toLowerCase();
-        if (!allText.contains("much higher") && !allText.contains("are you sure")) {
+        WidgetChild confirm = findVisibleWidgetText(ctx, "Yes");
+        if (confirm == null || !confirm.isValid()) {
+            stats.setStatus("GE price warning visible, waiting for Yes button");
+            Time.sleep(500, 800);
             return false;
         }
 
@@ -521,8 +548,36 @@ public class TravelLoadoutService {
         if (!confirm.interact("Continue") && !confirm.interact("Yes")) {
             confirm.click();
         }
-        Time.sleep(700, 1100);
+        Time.sleep(700, 1100,
+                () -> !isHighPriceWarningOpen(ctx)
+                        || (activePurchase != null && findActiveSlot(ctx, activePurchase.itemName) != null),
+                100);
         return true;
+    }
+
+    private boolean isHighPriceWarningOpen(APIContext ctx) {
+        String allText = allWidgetText(ctx).toLowerCase();
+        return (allText.contains("much higher")
+                || allText.contains("are you sure")
+                || allText.contains("higher than the guide price"))
+                && allText.contains("yes");
+    }
+
+    private WidgetChild findVisibleWidgetText(APIContext ctx, String needle) {
+        List<WidgetChild> widgets = ctx.widgets().getAllChildren(widget -> {
+            if (widget == null || !widget.isValid() || !widget.isVisible()
+                    || widget.getWidth() <= 0 || widget.getHeight() <= 0) {
+                return false;
+            }
+            String text = widget.getText();
+            if (text == null || text.isBlank()) {
+                text = widget.getRawText();
+            }
+            return text != null && text.replaceAll("<[^>]+>", " ")
+                    .trim()
+                    .equalsIgnoreCase(needle);
+        });
+        return widgets.isEmpty() ? null : widgets.get(0);
     }
 
     private boolean abortDuplicateOpenLoadoutOffers(APIContext ctx) {
@@ -600,7 +655,9 @@ public class TravelLoadoutService {
         int waiting = 0;
         for (LoadoutPurchase purchase : placedBatch) {
             GrandExchangeSlot slot = findActiveSlot(ctx, purchase.itemName);
-            if (slot == null || slot.isCompleted() || slot.canCollect()) {
+            if (slot == null) {
+                waiting++;
+            } else if (slot.isCompleted() || slot.canCollect()) {
                 ready++;
             } else {
                 waiting++;
@@ -635,6 +692,7 @@ public class TravelLoadoutService {
         placedBatch.clear();
         activePurchase = null;
         offerFailures = 0;
+        activePurchaseConfirmUntil = 0L;
         nextBatchCollectAt = 0L;
     }
 

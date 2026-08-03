@@ -7,6 +7,7 @@ import org.gusta.mixology.stats.MixologyStats;
 
 import java.awt.event.KeyEvent;
 import java.util.List;
+import java.util.Locale;
 
 public class RecoveryService {
     private final MixologyStats stats;
@@ -45,6 +46,9 @@ public class RecoveryService {
 
         List<WidgetChild> options = ctx.dialogues().getOptions();
         if (options != null && !options.isEmpty()) {
+            if (selectYesAndDontAskAgain(ctx, options)) {
+                return true;
+            }
             stats.setStatus("Dialogue options visible: " + optionSummary(options));
             ctx.keyboard().sendKey(KeyEvent.VK_SPACE);
             Time.sleep(450, 800);
@@ -72,6 +76,48 @@ public class RecoveryService {
             return true;
         }
         return false;
+    }
+
+    private boolean selectYesAndDontAskAgain(APIContext ctx, List<WidgetChild> options) {
+        boolean found = false;
+        for (WidgetChild option : options) {
+            if (optionTextMatches(option, "yes", "don", "ask", "again")) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+
+        stats.setStatus("Confirming dialogue: Yes, and don't ask again");
+        ctx.dialogues().selectOption(text -> textMatches(text, "yes", "don", "ask", "again"));
+        Time.sleep(700, 1100);
+        return true;
+    }
+
+    private boolean optionTextMatches(WidgetChild option, String... needles) {
+        if (option == null) {
+            return false;
+        }
+        String text = option.getText();
+        if (text == null || text.isBlank()) {
+            text = option.getRawText();
+        }
+        return textMatches(text, needles);
+    }
+
+    private boolean textMatches(String value, String... needles) {
+        String normalized = normalize(value);
+        if (normalized.isBlank()) {
+            return false;
+        }
+        for (String needle : needles) {
+            if (!normalized.contains(normalize(needle))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private String optionSummary(List<WidgetChild> options) {
@@ -114,5 +160,15 @@ public class RecoveryService {
             return normalized;
         }
         return normalized.substring(0, Math.max(1, maxChars - 3)) + "...";
+    }
+
+    private String normalize(String value) {
+        return value == null
+                ? ""
+                : value.replaceAll("<[^>]+>", " ")
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9 ]", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
     }
 }

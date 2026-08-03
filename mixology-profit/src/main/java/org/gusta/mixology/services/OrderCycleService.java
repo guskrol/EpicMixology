@@ -49,11 +49,11 @@ public class OrderCycleService {
         pruneTrackedReadyOrdersToInventory(ctx, orders);
 
         if (pendingFinalizerOrder != null) {
-            stats.setStatus("Resuming pending finalizer: " + pendingFinalizerOrder.label());
-            if (!processing.processPotion(ctx, pendingFinalizerOrder)) {
+            PendingFinalizerResult result = finishOrResyncPendingFinalizer(
+                    ctx, pendingFinalizerOrder, "resuming pending finalizer");
+            if (result == PendingFinalizerResult.WAIT) {
                 return false;
             }
-            recordTrackedReadyOrder(pendingFinalizerOrder);
             pendingFinalizerOrder = null;
         }
 
@@ -93,14 +93,19 @@ public class OrderCycleService {
                 stats.setLastOrder(order.label());
                 stats.setStatus("Finishing carried unfinished potion for order: " + order.label());
                 pendingFinalizerOrder = order;
-                if (!processing.processPotion(ctx, order)) {
+                PendingFinalizerResult result = finishOrResyncPendingFinalizer(
+                        ctx, order, "finishing carried unfinished potion");
+                if (result == PendingFinalizerResult.WAIT) {
                     return false;
                 }
-                recordTrackedReadyOrder(order);
                 pendingFinalizerOrder = null;
-                completedLocally++;
-                Time.sleep(450, 850);
-                continue;
+                if (result != PendingFinalizerResult.MISSING) {
+                    completedLocally++;
+                    Time.sleep(450, 850);
+                    continue;
+                }
+                stats.debug("Carried unfinished potion disappeared before finalizer; remixing order: "
+                        + order.label());
             }
 
             stats.setLastOrder(order.label());
@@ -108,11 +113,16 @@ public class OrderCycleService {
                 return false;
             }
             pendingFinalizerOrder = order;
-            if (!processing.processPotion(ctx, order)) {
+            PendingFinalizerResult result = finishOrResyncPendingFinalizer(
+                    ctx, order, "finishing newly mixed base");
+            if (result == PendingFinalizerResult.WAIT) {
                 return false;
             }
-            recordTrackedReadyOrder(order);
             pendingFinalizerOrder = null;
+            if (result == PendingFinalizerResult.MISSING) {
+                stats.setStatus("Mixed base was not available for finalizer; retrying order safely");
+                return false;
+            }
             completedLocally++;
             Time.sleep(450, 850);
         }
@@ -141,6 +151,51 @@ public class OrderCycleService {
                 + " details=" + potionInventory.allPotionDetails(ctx));
         stats.setStatus("Depositing " + Math.min(orders.size(), readyAfter) + " order potions together");
         return deliverTrackedBatch(ctx, orders);
+    }
+
+    private PendingFinalizerResult finishOrResyncPendingFinalizer(
+            APIContext ctx,
+            PotionOrder order,
+            String reason
+    ) {
+        if (order == null || !order.isComplete()) {
+            stats.setStatus("Clearing invalid pending finalizer");
+            return PendingFinalizerResult.MISSING;
+        }
+
+        PotionRecipe recipe = order.recipe();
+        int unfinished = potionInventory.unfinishedPotionCount(ctx, recipe);
+        if (unfinished <= 0) {
+            int ready = potionInventory.potionCount(ctx, recipe);
+            int trackedByRecipe = trackedReadyRecipeCount(recipe, activeOrderBatch);
+            if (ready > trackedByRecipe) {
+                stats.setStatus("Pending finalizer already ready in inventory: " + order.label());
+                stats.debug("Resynced pending finalizer from ready inventory: "
+                        + order.label()
+                        + " reason=" + reason
+                        + " ready=" + ready
+                        + " trackedByRecipe=" + trackedByRecipe
+                        + " inventory=" + potionInventory.allPotionDetails(ctx));
+                recordTrackedReadyOrder(order);
+                return PendingFinalizerResult.ALREADY_READY;
+            }
+
+            stats.setStatus("Clearing stale finalizer; no unfinished base for " + order.label());
+            stats.debug("Stale pending finalizer cleared: "
+                    + order.label()
+                    + " reason=" + reason
+                    + " ready=" + ready
+                    + " trackedByRecipe=" + trackedByRecipe
+                    + " inventory=" + potionInventory.allPotionDetails(ctx));
+            return PendingFinalizerResult.MISSING;
+        }
+
+        stats.setStatus("Resuming pending finalizer: " + order.label());
+        if (!processing.processPotion(ctx, order)) {
+            return PendingFinalizerResult.WAIT;
+        }
+        recordTrackedReadyOrder(order);
+        return PendingFinalizerResult.PROCESSED;
     }
 
     public boolean hasTrackedRequiredOrdersForCurrentBatch(List<PotionOrder> orders) {
@@ -489,5 +544,12 @@ public class OrderCycleService {
             text.append(entry.getKey().code()).append('=').append(entry.getValue());
         }
         return text.toString();
+    }
+
+    private enum PendingFinalizerResult {
+        PROCESSED,
+        ALREADY_READY,
+        MISSING,
+        WAIT
     }
 }
