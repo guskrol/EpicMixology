@@ -3,6 +3,7 @@ package org.gusta.mixology.services;
 import com.epicbot.api.shared.APIContext;
 import com.epicbot.api.shared.util.time.Time;
 import org.gusta.mixology.domain.PotionOrder;
+import org.gusta.mixology.domain.PotionProcess;
 import org.gusta.mixology.domain.PotionRecipe;
 import org.gusta.mixology.stats.MixologyStats;
 
@@ -22,6 +23,7 @@ public class OrderCycleService {
     private PotionOrder pendingFinalizerOrder;
     private final List<PotionOrder> trackedReadyOrders = new ArrayList<>();
     private List<PotionOrder> activeOrderBatch = new ArrayList<>();
+    private long nextReadyRecoveryDiagnosticAt;
 
     public OrderCycleService(
             MixerService mixer,
@@ -55,6 +57,21 @@ public class OrderCycleService {
                 return false;
             }
             pendingFinalizerOrder = null;
+        }
+
+        int recoveredReady = recoverUntrackedReadyOrders(ctx, orders);
+
+        if (recoveredReady == 1
+                && trackedReadyOrders.size() == 1
+                && potionInventory.readyPotionCount(ctx) == 1
+                && potionInventory.anyPotionCount(ctx) == 1) {
+            PotionOrder target = trackedReadyOrders.get(0);
+            stats.setStatus("Recovering one isolated target potion before starting a fresh batch");
+            if (!conveyor.depositTargetOrder(ctx, target)) {
+                return false;
+            }
+            resetTrackedBatch("isolated target potion delivered; rereading current orders");
+            return true;
         }
 
         int readyBefore = potionInventory.readyPotionCount(ctx);
@@ -422,6 +439,88 @@ public class OrderCycleService {
             trackedReadyOrders.clear();
             trackedReadyOrders.addAll(pruned);
         }
+    }
+
+    private int recoverUntrackedReadyOrders(APIContext ctx, List<PotionOrder> orders) {
+        Map<PotionRecipe, Integer> ready = potionInventory.readyPotionCounts(ctx);
+        if (ready.isEmpty()) {
+            return 0;
+        }
+
+        List<PotionOrder> remaining = remainingOrdersForCurrentBatch(orders);
+        Map<PotionRecipe, List<PotionOrder>> remainingByRecipe = new EnumMap<>(PotionRecipe.class);
+        for (PotionOrder order : remaining) {
+            if (order == null || !order.isComplete()) {
+                continue;
+            }
+            remainingByRecipe.computeIfAbsent(order.recipe(), ignored -> new ArrayList<>()).add(order);
+        }
+
+        int recovered = 0;
+        StringBuilder ambiguous = new StringBuilder();
+        for (Map.Entry<PotionRecipe, List<PotionOrder>> entry : remainingByRecipe.entrySet()) {
+            PotionRecipe recipe = entry.getKey();
+            List<PotionOrder> recipeOrders = entry.getValue();
+            int trackedByRecipe = trackedReadyRecipeCount(recipe, orders);
+            int untrackedReady = Math.max(0, ready.getOrDefault(recipe, 0) - trackedByRecipe);
+            int recoverable = Math.min(untrackedReady, recipeOrders.size());
+            if (recoverable <= 0) {
+                continue;
+            }
+
+            if (!hasUnambiguousRecoveryProcess(recipeOrders, recoverable)) {
+                if (ambiguous.length() > 0) {
+                    ambiguous.append(", ");
+                }
+                ambiguous.append(recipe.code())
+                        .append(" ready=").append(untrackedReady)
+                        .append(" remaining=").append(orderBatchText(recipeOrders));
+                continue;
+            }
+
+            for (int index = 0; index < recoverable; index++) {
+                recordTrackedReadyOrder(recipeOrders.get(index));
+                recovered++;
+            }
+        }
+
+        if (recovered > 0) {
+            stats.setStatus("Recovered " + recovered
+                    + " processed potion(s) into the active order batch");
+            stats.debug("Recovered untracked ready inventory into active batch: recovered="
+                    + recovered
+                    + " active=" + orderBatchText(activeOrderBatch)
+                    + " tracked=" + trackedOrderText()
+                    + " inventory=" + potionInventory.readyPotionDetails(ctx));
+        }
+
+        long now = System.currentTimeMillis();
+        if (ambiguous.length() > 0 && now >= nextReadyRecoveryDiagnosticAt) {
+            nextReadyRecoveryDiagnosticAt = now + 10_000L;
+            stats.debug("Skipped ambiguous ready-potion recovery because processed item ids do not encode "
+                    + "the workstation: " + ambiguous);
+        }
+        return recovered;
+    }
+
+    private boolean hasUnambiguousRecoveryProcess(List<PotionOrder> orders, int recoverable) {
+        if (orders == null || orders.isEmpty() || recoverable <= 0) {
+            return false;
+        }
+        if (recoverable >= orders.size()) {
+            return true;
+        }
+
+        PotionProcess process = orders.get(0).process();
+        if (process == null) {
+            return false;
+        }
+        for (PotionOrder order : orders) {
+            if (order == null || order.process() != process) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void recordTrackedReadyOrder(PotionOrder order) {

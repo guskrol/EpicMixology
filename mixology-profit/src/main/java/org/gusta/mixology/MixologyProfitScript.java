@@ -41,8 +41,8 @@ import java.util.List;
 
 @ScriptManifest(name = "Mixology Profit", gameType = GameType.OS)
 public class MixologyProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.77";
-    private static final String SCRIPT_UPDATE_NOTE = "Stamina loadout buy at 5k";
+    private static final String SCRIPT_VERSION = "v0.2.84";
+    private static final String SCRIPT_UPDATE_NOTE = "Recover one target potion, then resume three-order batches";
 
     private MixologyStats stats;
     private MixologyPaint paint;
@@ -61,8 +61,8 @@ public class MixologyProfitScript extends Script {
         TravelService travel = new TravelService(settings, stats);
         BankService bank = new BankService(settings, objects, stats);
         RefinerService refiner = new RefinerService(settings, objects, bank, stats);
-        HopperService hopper = new HopperService(settings, objects, bank, stats);
         HopperStockReader hopperStockReader = new HopperStockReader(stats);
+        HopperService hopper = new HopperService(settings, objects, bank, hopperStockReader, stats);
         OrderReader orderReader = new OrderReader(stats);
         PotionInventoryService potionInventory = new PotionInventoryService();
         MixerService mixer = new MixerService(settings, objects, stats, potionInventory);

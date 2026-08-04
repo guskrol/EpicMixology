@@ -3,6 +3,7 @@ package org.gusta.mixology.services;
 import com.epicbot.api.shared.APIContext;
 import com.epicbot.api.shared.entity.ItemWidget;
 import com.epicbot.api.shared.entity.WidgetChild;
+import com.epicbot.api.shared.methods.IBankAPI;
 import com.epicbot.api.shared.methods.IEquipmentAPI;
 import com.epicbot.api.shared.model.Tile;
 import com.epicbot.api.shared.model.ge.GrandExchangeOffer;
@@ -26,35 +27,43 @@ public class TravelLoadoutService {
     private static final int GE_MAX_Y = 3505;
     private static final Tile GRAND_EXCHANGE_WALK_TILE = new Tile(3164, 3487, 0);
     private static final int GE_SLOT_BATCH_SIZE = 8;
+    private static final long COLLECTED_BANK_CONFIRM_TIMEOUT_MILLIS = 12_000L;
+    private static final long RING_EQUIP_RETRY_MILLIS = 2_500L;
     private static final String COINS = "Coins";
     private static final int CHARTER_COINS = 3_100;
     private static final int STAMINA_ONE_DOSE_BUY_PRICE = 5_000;
 
-    private static final GearItem[][] RANDOM_GEAR_PRESETS = {
+    private static final GearItem[][] STARTUP_GEAR_CANDIDATES = {
             {
-                    new GearItem("Staff of air", "Wield", 2_000),
-                    new GearItem("Blue wizard hat", "Wear", 800),
-                    new GearItem("Blue wizard robe", "Wear", 1_200),
-                    new GearItem("Black cape", "Wear", 1_000),
-                    new GearItem("Leather boots", "Wear", 500),
-                    new GearItem("Leather gloves", "Wear", 500),
-                    new GearItem("Amulet of accuracy", "Wear", 1_000)
+                    new GearItem(IEquipmentAPI.Slot.WEAPON, "Bronze sword", "Wield", 500),
+                    new GearItem(IEquipmentAPI.Slot.WEAPON, "Iron scimitar", "Wield", 1_500),
+                    new GearItem(IEquipmentAPI.Slot.WEAPON, "Staff of air", "Wield", 2_000),
+                    new GearItem(IEquipmentAPI.Slot.WEAPON, "Shortbow", "Wield", 800)
             },
             {
-                    new GearItem("Shortbow", "Wield", 800),
-                    new GearItem("Leather cowl", "Wear", 500),
-                    new GearItem("Leather body", "Wear", 800),
-                    new GearItem("Leather chaps", "Wear", 800),
-                    new GearItem("Red cape", "Wear", 1_000),
-                    new GearItem("Leather boots", "Wear", 500),
-                    new GearItem("Leather gloves", "Wear", 500)
+                    new GearItem(IEquipmentAPI.Slot.HELMET, "Blue wizard hat", "Wear", 800),
+                    new GearItem(IEquipmentAPI.Slot.HELMET, "Leather cowl", "Wear", 500)
             },
             {
-                    new GearItem("Iron scimitar", "Wield", 1_500),
-                    new GearItem("Black cape", "Wear", 1_000),
-                    new GearItem("Leather boots", "Wear", 500),
-                    new GearItem("Leather gloves", "Wear", 500),
-                    new GearItem("Amulet of accuracy", "Wear", 1_000)
+                    new GearItem(IEquipmentAPI.Slot.BODY, "Blue wizard robe", "Wear", 1_200),
+                    new GearItem(IEquipmentAPI.Slot.BODY, "Leather body", "Wear", 800)
+            },
+            {
+                    new GearItem(IEquipmentAPI.Slot.NECK, "Amulet of accuracy", "Wear", 1_000),
+                    new GearItem(IEquipmentAPI.Slot.NECK, "Amulet of magic", "Wear", 1_000)
+            },
+            {
+                    new GearItem(IEquipmentAPI.Slot.HANDS, "Gold bracelet", "Wear", 1_500)
+            },
+            {
+                    new GearItem(IEquipmentAPI.Slot.LEGS, "Leather chaps", "Wear", 800)
+            },
+            {
+                    new GearItem(IEquipmentAPI.Slot.FEET, "Leather boots", "Wear", 500)
+            },
+            {
+                    new GearItem(IEquipmentAPI.Slot.CAPE, "Black cape", "Wear", 1_000),
+                    new GearItem(IEquipmentAPI.Slot.CAPE, "Red cape", "Wear", 1_000)
             }
     };
 
@@ -63,9 +72,9 @@ public class TravelLoadoutService {
     private final Queue<LoadoutPurchase> pendingPurchases = new ArrayDeque<>();
     private final List<LoadoutPurchase> placedBatch = new ArrayList<>();
     private final List<LoadoutPurchase> missingAfterBankCheck = new ArrayList<>();
+    private final List<LoadoutPurchase> awaitingCollectedBankItems = new ArrayList<>();
 
     private GearItem[] selectedGear;
-    private boolean allowOptionalGearPurchases;
     private boolean bankCheckedForLoadout;
     private boolean geCheckedForExistingOffers;
     private boolean purchasesPlanned;
@@ -74,6 +83,10 @@ public class TravelLoadoutService {
     private int offerFailures;
     private long activePurchaseConfirmUntil;
     private long nextBatchCollectAt;
+    private long collectedBankConfirmUntil;
+    private int collectedBankScanAttempts;
+    private long nextRingEquipAttemptAt;
+    private int ringEquipAttempts;
 
     public TravelLoadoutService(MixologyStats stats, GePricingService pricing) {
         this.stats = stats;
@@ -87,10 +100,15 @@ public class TravelLoadoutService {
         pendingPurchases.clear();
         placedBatch.clear();
         missingAfterBankCheck.clear();
+        awaitingCollectedBankItems.clear();
         activePurchase = null;
         offerFailures = 0;
         activePurchaseConfirmUntil = 0L;
         nextBatchCollectAt = 0L;
+        collectedBankConfirmUntil = 0L;
+        collectedBankScanAttempts = 0;
+        nextRingEquipAttemptAt = 0L;
+        ringEquipAttempts = 0;
     }
 
     public boolean prepareForTravel(APIContext ctx) {
@@ -141,7 +159,21 @@ public class TravelLoadoutService {
             return false;
         }
 
-        stats.setStatus("Travel loadout ready: ROW equipped, 3100 coins, one Stamina potion(1)");
+        if (!requiredStartupSlotsFilled(ctx)) {
+            if (hasUnequippedSelectedGearInInventory(ctx)) {
+                stats.setStatus("Waiting to equip missing startup slot(s): " + missingStartupSlots(ctx));
+                return false;
+            }
+            stats.setStatus("Travel outfit still missing slot(s): " + missingStartupSlots(ctx)
+                    + "; rechecking bank and GE candidates");
+            selectedGear = null;
+            purchasesPlanned = false;
+            bankCheckedForLoadout = false;
+            geCheckedForExistingOffers = false;
+            return false;
+        }
+
+        stats.setStatus("Travel loadout ready: ROW equipped, outfit slots filled, 3100 coins, one Stamina potion(1)");
         return true;
     }
 
@@ -177,7 +209,8 @@ public class TravelLoadoutService {
 
         if (selectedGear != null) {
             startupGearPrepared = true;
-            stats.setStatus("Startup random gear ready: " + selectedGearSummary());
+            stats.setStatus("Startup gear scan complete: " + equippedSlotSummary(ctx)
+                    + "; remaining slots will be completed before travel");
             return true;
         }
 
@@ -196,6 +229,34 @@ public class TravelLoadoutService {
             missingAfterBankCheck.clear();
             selectGearFromAvailableItems(ctx);
             addMissingLoadoutPurchases(ctx, missingAfterBankCheck);
+
+            List<LoadoutPurchase> expectedButMissing = expectedCollectedItemsStillMissing(
+                    missingAfterBankCheck);
+            if (!expectedButMissing.isEmpty()
+                    && System.currentTimeMillis() < collectedBankConfirmUntil) {
+                collectedBankScanAttempts++;
+                bankCheckedForLoadout = false;
+                stats.setStatus("Waiting for collected GE loadout item(s) to appear in bank: "
+                        + purchaseSummary(expectedButMissing)
+                        + " scan=" + collectedBankScanAttempts);
+                if (collectedBankScanAttempts % 2 == 0) {
+                    ctx.bank().close();
+                    Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
+                } else {
+                    Time.sleep(700, 1100);
+                }
+                return false;
+            }
+            if (expectedButMissing.isEmpty() && !awaitingCollectedBankItems.isEmpty()) {
+                stats.debug("Confirmed collected GE loadout items in bank/inventory/equipment: "
+                        + purchaseSummary(awaitingCollectedBankItems));
+                clearCollectedBankExpectation();
+            } else if (!expectedButMissing.isEmpty()) {
+                stats.debug("Collected GE loadout bank confirmation timed out; checking active GE offers "
+                        + "before any rebuy: " + purchaseSummary(expectedButMissing));
+                clearCollectedBankExpectation();
+            }
+
             bankCheckedForLoadout = true;
             stats.debug("Travel loadout bank scan: row=" + firstBankItem(ctx, TravelItems.CHARGED_RING_OF_WEALTH)
                     + " stamina=" + firstBankItem(ctx, TravelItems.STAMINA_POTIONS)
@@ -270,6 +331,21 @@ public class TravelLoadoutService {
                     STAMINA_ONE_DOSE_BUY_PRICE,
                     true
             ));
+        }
+        if (selectedGear != null) {
+            for (GearItem item : selectedGear) {
+                if (isSlotOccupied(ctx, item.slot)
+                        || hasInventoryItem(ctx, item.name)
+                        || firstBankItem(ctx, item.name) != null) {
+                    continue;
+                }
+                missing.add(new LoadoutPurchase(
+                        item.name,
+                        1,
+                        item.fallbackPrice,
+                        false
+                ));
+            }
         }
     }
 
@@ -346,44 +422,124 @@ public class TravelLoadoutService {
             return;
         }
 
-        List<Integer> availablePresetIndexes = new ArrayList<>();
-        for (int i = 0; i < RANDOM_GEAR_PRESETS.length; i++) {
-            if (gearAvailabilityScore(ctx, RANDOM_GEAR_PRESETS[i]) > 0) {
-                availablePresetIndexes.add(i);
+        List<GearItem> selected = new ArrayList<>();
+        for (GearItem[] candidates : STARTUP_GEAR_CANDIDATES) {
+            if (candidates.length == 0 || isSlotOccupied(ctx, candidates[0].slot)) {
+                continue;
             }
-        }
 
-        if (!availablePresetIndexes.isEmpty()) {
-            int selectedIndex = availablePresetIndexes.get(
-                    ThreadLocalRandom.current().nextInt(availablePresetIndexes.size()));
-            List<GearItem> availableGear = new ArrayList<>();
-            for (GearItem item : RANDOM_GEAR_PRESETS[selectedIndex]) {
-                if (hasEquippedInventoryOrBank(ctx, item.name)) {
-                    availableGear.add(item);
+            IEquipmentAPI.Slot slot = candidates[0].slot;
+            List<GearItem> available = existingGearForSlot(ctx, slot);
+            for (GearItem candidate : candidates) {
+                if ((hasInventoryItem(ctx, candidate.name) || firstBankItem(ctx, candidate.name) != null)
+                        && !containsGearName(available, candidate.name)) {
+                    available.add(candidate);
                 }
             }
-            selectedGear = availableGear.toArray(new GearItem[0]);
-            allowOptionalGearPurchases = false;
-            stats.debug("Selected random existing travel gear preset index=" + selectedIndex
-                    + " availablePieces=" + selectedGear.length + "/" + RANDOM_GEAR_PRESETS[selectedIndex].length
-                    + " gear=" + selectedGearSummary()
-                    + "; GE optional gear buy disabled");
+            List<GearItem> pool = available.isEmpty() ? List.of(candidates) : available;
+            selected.add(pool.get(ThreadLocalRandom.current().nextInt(pool.size())));
+        }
+
+        selectedGear = selected.toArray(new GearItem[0]);
+        stats.debug("Selected startup gear by empty slot: selected=" + selectedGearSummary()
+                + " equipped=" + equippedSlotSummary(ctx)
+                + " missing=" + missingStartupSlots(ctx));
+    }
+
+    private List<GearItem> existingGearForSlot(APIContext ctx, IEquipmentAPI.Slot slot) {
+        List<GearItem> available = new ArrayList<>();
+        for (ItemWidget item : ctx.inventory().getItems()) {
+            addExistingGearCandidate(available, item, slot);
+        }
+        if (ctx.bank().isOpen()) {
+            for (ItemWidget item : ctx.bank().getItems()) {
+                addExistingGearCandidate(available, item, slot);
+            }
+        }
+        return available;
+    }
+
+    private void addExistingGearCandidate(
+            List<GearItem> available,
+            ItemWidget item,
+            IEquipmentAPI.Slot slot
+    ) {
+        if (item == null || item.getName() == null || item.getName().isBlank() || item.isNoted()) {
             return;
         }
 
-        selectedGear = new GearItem[0];
-        allowOptionalGearPurchases = false;
-        stats.debug("No existing travel gear found in bank/inventory/equipment; continuing without random gear");
+        String name = item.getName();
+        String lowerName = name.toLowerCase();
+        if (!matchesEquipmentSlot(item, lowerName, slot) || containsGearName(available, name)) {
+            return;
+        }
+
+        available.add(new GearItem(
+                slot,
+                name,
+                slot == IEquipmentAPI.Slot.WEAPON ? "Wield" : "Wear",
+                fallbackPriceForSlot(slot)
+        ));
     }
 
-    private int gearAvailabilityScore(APIContext ctx, GearItem[] preset) {
-        int score = 0;
-        for (GearItem item : preset) {
-            if (hasEquippedInventoryOrBank(ctx, item.name)) {
-                score++;
+    private boolean matchesEquipmentSlot(
+            ItemWidget item,
+            String lowerName,
+            IEquipmentAPI.Slot slot
+    ) {
+        return switch (slot) {
+            case WEAPON -> item.hasAction("Wield") || containsAny(lowerName,
+                    "sword", "scimitar", "dagger", "mace", "spear", "hasta", "halberd",
+                    "staff", "wand", "bow", "crossbow", "whip", "maul", "warhammer",
+                    "battleaxe", "claws", "sceptre");
+            case HELMET -> containsAny(lowerName,
+                    "helmet", "helm", "hat", "cowl", "coif", "hood", "mask", "mitre",
+                    "tiara", "headband", "headpiece", "crown");
+            case CAPE -> containsAny(lowerName,
+                    "cape", "cloak", "accumulator", "attractor", "assembler");
+            case NECK -> containsAny(lowerName,
+                    "amulet", "necklace", "pendant", "symbol", "stole", "scarf");
+            case BODY -> !containsAny(lowerName,
+                    "bottom", "skirt", "legs", "chaps", "trousers", "leggings")
+                    && containsAny(lowerName,
+                    "body", "platebody", "chainbody", "chestplate", "robe", "shirt", "tunic",
+                    "jacket", "torso", "apron", "hauberk", "brassard");
+            case HANDS -> containsAny(lowerName,
+                    "bracelet", "gloves", "gauntlets", "vambraces", "bracers");
+            case LEGS -> containsAny(lowerName,
+                    "platelegs", "plateskirt", "chaps", "trousers", "bottoms", "robe bottom",
+                    "skirt", "leggings", "tassets", "greaves");
+            case FEET -> containsAny(lowerName,
+                    "boots", "shoes", "sandals", "slippers");
+            default -> false;
+        };
+    }
+
+    private boolean containsAny(String value, String... fragments) {
+        for (String fragment : fragments) {
+            if (value.contains(fragment)) {
+                return true;
             }
         }
-        return score;
+        return false;
+    }
+
+    private int fallbackPriceForSlot(IEquipmentAPI.Slot slot) {
+        return switch (slot) {
+            case WEAPON -> 2_000;
+            case HANDS -> 1_500;
+            case BODY -> 1_200;
+            default -> 1_000;
+        };
+    }
+
+    private boolean containsGearName(List<GearItem> items, String itemName) {
+        for (GearItem item : items) {
+            if (TravelItems.matchesAny(item.name, itemName)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private int loadoutBuyPrice(APIContext ctx, String itemName, int fallbackPrice) {
@@ -614,8 +770,8 @@ public class TravelLoadoutService {
         if (TravelItems.isStaminaPotion(itemName)) {
             return "stamina";
         }
-        for (GearItem[] preset : RANDOM_GEAR_PRESETS) {
-            for (GearItem item : preset) {
+        for (GearItem[] candidates : STARTUP_GEAR_CANDIDATES) {
+            for (GearItem item : candidates) {
                 if (TravelItems.matchesAny(itemName, item.name)) {
                     return "gear:" + item.name;
                 }
@@ -651,12 +807,17 @@ public class TravelLoadoutService {
             return;
         }
 
+        if (allPlacedLoadoutOffersCleared(ctx)) {
+            confirmCollectedLoadoutBatch("GE slots already clear before collect retry");
+            return;
+        }
+
         int ready = 0;
         int waiting = 0;
         for (LoadoutPurchase purchase : placedBatch) {
             GrandExchangeSlot slot = findActiveSlot(ctx, purchase.itemName);
             if (slot == null) {
-                waiting++;
+                ready++;
             } else if (slot.isCompleted() || slot.canCollect()) {
                 ready++;
             } else {
@@ -673,14 +834,66 @@ public class TravelLoadoutService {
         }
 
         stats.setStatus("Collecting GE loadout batch to bank: " + placedBatch.size() + " offer(s)");
+        boolean collectRequested = false;
         try {
-            ctx.grandExchange().collectToBank();
-        } catch (RuntimeException ignored) {
-            // Collection can be retried when the client reports the slot a tick early.
+            collectRequested = ctx.grandExchange().collectToBank();
+        } catch (RuntimeException exception) {
+            stats.debug("GE loadout collectToBank failed: "
+                    + exception.getClass().getSimpleName() + ": " + exception.getMessage());
         }
-        Time.sleep(700, 1100);
+
+        Time.sleep(1200, 2200, () -> allPlacedLoadoutOffersCleared(ctx), 100);
+        if (!allPlacedLoadoutOffersCleared(ctx)) {
+            stats.setStatus("GE loadout collection not confirmed; keeping batch for retry");
+            stats.debug("GE loadout collect confirmation failed: requested=" + collectRequested
+                    + " remaining=" + activePlacedBatchText(ctx));
+            nextBatchCollectAt = System.currentTimeMillis() + 2_500L;
+            return;
+        }
+
+        confirmCollectedLoadoutBatch("GE slots cleared after collect request=" + collectRequested);
+    }
+
+    private void confirmCollectedLoadoutBatch(String reason) {
+        awaitingCollectedBankItems.clear();
+        awaitingCollectedBankItems.addAll(placedBatch);
+        collectedBankConfirmUntil = System.currentTimeMillis()
+                + COLLECTED_BANK_CONFIRM_TIMEOUT_MILLIS;
+        collectedBankScanAttempts = 0;
         stats.setStatus("GE loadout batch collected; rechecking bank before any more buys");
+        stats.debug("GE loadout collection confirmed: " + reason
+                + " expectedBank=" + purchaseSummary(awaitingCollectedBankItems));
         clearPlannedPurchasesForBankRecheck();
+    }
+
+    private boolean allPlacedLoadoutOffersCleared(APIContext ctx) {
+        for (LoadoutPurchase purchase : placedBatch) {
+            if (findActiveSlot(ctx, purchase.itemName) != null) {
+                return false;
+            }
+        }
+        return !placedBatch.isEmpty();
+    }
+
+    private String activePlacedBatchText(APIContext ctx) {
+        StringBuilder text = new StringBuilder();
+        for (LoadoutPurchase purchase : placedBatch) {
+            GrandExchangeSlot slot = findActiveSlot(ctx, purchase.itemName);
+            if (slot == null) {
+                continue;
+            }
+            if (text.length() > 0) {
+                text.append(", ");
+            }
+            GrandExchangeOffer offer = slot.getOffer();
+            text.append(purchase.itemName)
+                    .append(" slot=").append(slot.getIndex())
+                    .append(" state=").append(slot.getState());
+            if (offer != null) {
+                text.append(" remaining=").append(offer.getRemaining());
+            }
+        }
+        return text.length() == 0 ? "none" : text.toString();
     }
 
     private void clearPlannedPurchasesForBankRecheck() {
@@ -711,6 +924,15 @@ public class TravelLoadoutService {
             return false;
         }
         if (!openBank(ctx)) {
+            return true;
+        }
+
+        if (!ctx.bank().isWithdrawMode(IBankAPI.WithdrawMode.ITEM)) {
+            stats.setStatus("Selecting item withdraw mode for travel loadout");
+            ctx.bank().selectWithdrawMode(IBankAPI.WithdrawMode.ITEM);
+            Time.sleep(500, 900,
+                    () -> ctx.bank().isWithdrawMode(IBankAPI.WithdrawMode.ITEM),
+                    100);
             return true;
         }
 
@@ -793,24 +1015,60 @@ public class TravelLoadoutService {
 
     private boolean equipInventoryLoadout(APIContext ctx) {
         if (hasChargedRingInInventory(ctx) && !hasChargedRingEquipped(ctx)) {
-            return equipFirstMatching(ctx, "Wear", TravelItems.CHARGED_RING_OF_WEALTH);
+            long now = System.currentTimeMillis();
+            if (now < nextRingEquipAttemptAt) {
+                stats.setStatus("Waiting before retrying charged Ring of wealth equip; attempt="
+                        + ringEquipAttempts);
+                Time.sleep(350, 650);
+                return true;
+            }
+
+            ringEquipAttempts++;
+            boolean interacted = equipFirstMatching(ctx, IEquipmentAPI.Slot.RING,
+                    "Wear", TravelItems.CHARGED_RING_OF_WEALTH);
+            if (hasChargedRingEquipped(ctx)) {
+                stats.debug("Charged Ring of wealth equip confirmed after attempt="
+                        + ringEquipAttempts);
+                ringEquipAttempts = 0;
+                nextRingEquipAttemptAt = 0L;
+            } else {
+                nextRingEquipAttemptAt = System.currentTimeMillis() + RING_EQUIP_RETRY_MILLIS;
+                stats.setStatus("Charged Ring of wealth equip not confirmed; retrying attempt="
+                        + ringEquipAttempts);
+                stats.debug("Charged Ring equip pending: interacted=" + interacted
+                        + " inventory=" + hasChargedRingInInventory(ctx)
+                        + " slot=" + equippedItemName(ctx, IEquipmentAPI.Slot.RING));
+            }
+            return true;
         }
+        ringEquipAttempts = 0;
+        nextRingEquipAttemptAt = 0L;
         if (equipSelectedGear(ctx)) {
             return true;
         }
         return false;
     }
 
-    private boolean equipFirstMatching(APIContext ctx, String preferredAction, String... names) {
+    private boolean equipFirstMatching(
+            APIContext ctx,
+            IEquipmentAPI.Slot slot,
+            String preferredAction,
+            String... names
+    ) {
         for (String name : names) {
             if (hasInventoryItem(ctx, name)) {
-                return equipItem(ctx, name, preferredAction);
+                return equipItem(ctx, slot, name, preferredAction);
             }
         }
         return false;
     }
 
-    private boolean equipItem(APIContext ctx, String itemName, String preferredAction) {
+    private boolean equipItem(
+            APIContext ctx,
+            IEquipmentAPI.Slot slot,
+            String itemName,
+            String preferredAction
+    ) {
         ItemWidget widget = inventoryItem(ctx, itemName);
         if (widget == null) {
             return false;
@@ -828,12 +1086,18 @@ public class TravelLoadoutService {
                 || widget.interact("Equip")
                 || ctx.inventory().interactItem(preferredAction, itemName);
         Time.sleep(
-                700,
-                1600,
-                () -> ctx.equipment().contains(itemName)
-                        || ctx.inventory().getCount(true, itemName) < beforeInventoryCount,
+                900,
+                2200,
+                () -> slotContains(ctx, slot, itemName),
                 100
         );
+        if (interacted && !slotContains(ctx, slot, itemName)) {
+            stats.debug("Travel item equip click not yet confirmed in slot " + slot
+                    + ": item=" + itemName
+                    + " inventoryBefore=" + beforeInventoryCount
+                    + " inventoryNow=" + ctx.inventory().getCount(true, itemName)
+                    + " slotNow=" + equippedItemName(ctx, slot));
+        }
         return interacted;
     }
 
@@ -842,7 +1106,7 @@ public class TravelLoadoutService {
             return false;
         }
         for (GearItem item : selectedGear) {
-            if (!hasEquippedItem(ctx, item.name) && hasInventoryItem(ctx, item.name)) {
+            if (!isSlotOccupied(ctx, item.slot) && hasInventoryItem(ctx, item.name)) {
                 return true;
             }
         }
@@ -855,7 +1119,7 @@ public class TravelLoadoutService {
         }
 
         for (GearItem item : selectedGear) {
-            if (hasEquippedItem(ctx, item.name) || hasInventoryItem(ctx, item.name)) {
+            if (isSlotOccupied(ctx, item.slot) || hasInventoryItem(ctx, item.name)) {
                 continue;
             }
 
@@ -882,8 +1146,8 @@ public class TravelLoadoutService {
         }
 
         for (GearItem item : selectedGear) {
-            if (!hasEquippedItem(ctx, item.name) && hasInventoryItem(ctx, item.name)) {
-                return equipItem(ctx, item.name, item.action);
+            if (!isSlotOccupied(ctx, item.slot) && hasInventoryItem(ctx, item.name)) {
+                return equipItem(ctx, item.slot, item.name, item.action);
             }
         }
         return false;
@@ -894,7 +1158,7 @@ public class TravelLoadoutService {
             return false;
         }
         for (GearItem item : selectedGear) {
-            if (hasEquippedItem(ctx, item.name)) {
+            if (slotContains(ctx, item.slot, item.name)) {
                 return true;
             }
         }
@@ -907,12 +1171,64 @@ public class TravelLoadoutService {
 
     private ItemWidget inventoryItem(APIContext ctx, String itemName) {
         return ctx.inventory().getItem(item ->
-                item != null && TravelItems.matchesAny(item.getName(), itemName));
+                item != null
+                        && !item.isNoted()
+                        && TravelItems.matchesAny(item.getName(), itemName));
     }
 
     private boolean hasEquippedItem(APIContext ctx, String itemName) {
         return ctx.equipment().contains(item ->
                 item != null && TravelItems.matchesAny(item.getName(), itemName));
+    }
+
+    private boolean requiredStartupSlotsFilled(APIContext ctx) {
+        for (GearItem[] candidates : STARTUP_GEAR_CANDIDATES) {
+            if (candidates.length > 0 && !isSlotOccupied(ctx, candidates[0].slot)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private String missingStartupSlots(APIContext ctx) {
+        List<String> missing = new ArrayList<>();
+        for (GearItem[] candidates : STARTUP_GEAR_CANDIDATES) {
+            if (candidates.length > 0 && !isSlotOccupied(ctx, candidates[0].slot)) {
+                missing.add(candidates[0].slot.name());
+            }
+        }
+        return missing.isEmpty() ? "none" : String.join(", ", missing);
+    }
+
+    private String equippedSlotSummary(APIContext ctx) {
+        List<String> equipped = new ArrayList<>();
+        for (GearItem[] candidates : STARTUP_GEAR_CANDIDATES) {
+            if (candidates.length == 0) {
+                continue;
+            }
+            IEquipmentAPI.Slot slot = candidates[0].slot;
+            equipped.add(slot.name() + "=" + equippedItemName(ctx, slot));
+        }
+        equipped.add(IEquipmentAPI.Slot.RING.name() + "="
+                + equippedItemName(ctx, IEquipmentAPI.Slot.RING));
+        return String.join(", ", equipped);
+    }
+
+    private boolean isSlotOccupied(APIContext ctx, IEquipmentAPI.Slot slot) {
+        ItemWidget item = ctx.equipment().getItem(slot);
+        return item != null && item.getId() > 0;
+    }
+
+    private boolean slotContains(APIContext ctx, IEquipmentAPI.Slot slot, String itemName) {
+        ItemWidget item = ctx.equipment().getItem(slot);
+        return item != null && TravelItems.matchesAny(item.getName(), itemName);
+    }
+
+    private String equippedItemName(APIContext ctx, IEquipmentAPI.Slot slot) {
+        ItemWidget item = ctx.equipment().getItem(slot);
+        return item == null || item.getName() == null || item.getName().isBlank()
+                ? "empty"
+                : item.getName();
     }
 
     private boolean openBank(APIContext ctx) {
@@ -960,12 +1276,16 @@ public class TravelLoadoutService {
 
     private boolean hasChargedRingInInventory(APIContext ctx) {
         return ctx.inventory().contains(item ->
-                item != null && TravelItems.isChargedRingOfWealth(item.getName()));
+                item != null
+                        && !item.isNoted()
+                        && TravelItems.isChargedRingOfWealth(item.getName()));
     }
 
     private boolean hasStaminaInInventory(APIContext ctx) {
         return ctx.inventory().contains(item ->
-                item != null && TravelItems.isStaminaPotion(item.getName()));
+                item != null
+                        && !item.isNoted()
+                        && TravelItems.isStaminaPotion(item.getName()));
     }
 
     private boolean hasOneDoseStaminaInInventory(APIContext ctx) {
@@ -995,6 +1315,19 @@ public class TravelLoadoutService {
         if (!ctx.bank().isOpen()) {
             return null;
         }
+        for (String name : names) {
+            ItemWidget direct = ctx.bank().getItem(name);
+            if (direct != null && direct.getName() != null && !direct.getName().isBlank()) {
+                return direct.getName();
+            }
+            try {
+                if (ctx.bank().getCount(name) > 0) {
+                    return name;
+                }
+            } catch (RuntimeException ignored) {
+                // Fall through to the complete bank widget scan.
+            }
+        }
         for (ItemWidget item : ctx.bank().getItems()) {
             if (item == null || item.getName() == null || item.getName().isBlank()) {
                 continue;
@@ -1008,13 +1341,34 @@ public class TravelLoadoutService {
         return null;
     }
 
+    private List<LoadoutPurchase> expectedCollectedItemsStillMissing(
+            List<LoadoutPurchase> missing
+    ) {
+        List<LoadoutPurchase> expectedMissing = new ArrayList<>();
+        for (LoadoutPurchase expected : awaitingCollectedBankItems) {
+            for (LoadoutPurchase candidate : missing) {
+                if (purchaseItemMatches(expected.itemName, candidate.itemName)) {
+                    expectedMissing.add(expected);
+                    break;
+                }
+            }
+        }
+        return expectedMissing;
+    }
+
+    private void clearCollectedBankExpectation() {
+        awaitingCollectedBankItems.clear();
+        collectedBankConfirmUntil = 0L;
+        collectedBankScanAttempts = 0;
+    }
+
     private String selectedGearSummary() {
         if (selectedGear == null || selectedGear.length == 0) {
             return "-";
         }
         List<String> items = new ArrayList<>();
         for (GearItem item : selectedGear) {
-            items.add(item.name);
+            items.add(item.slot.name() + "=" + item.name);
         }
         return String.join(", ", items);
     }
@@ -1024,11 +1378,13 @@ public class TravelLoadoutService {
     }
 
     private static class GearItem {
+        private final IEquipmentAPI.Slot slot;
         private final String name;
         private final String action;
         private final int fallbackPrice;
 
-        private GearItem(String name, String action, int fallbackPrice) {
+        private GearItem(IEquipmentAPI.Slot slot, String name, String action, int fallbackPrice) {
+            this.slot = slot;
             this.name = name;
             this.action = action;
             this.fallbackPrice = fallbackPrice;

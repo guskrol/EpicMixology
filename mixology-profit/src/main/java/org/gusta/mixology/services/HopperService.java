@@ -4,6 +4,7 @@ import com.epicbot.api.shared.APIContext;
 import com.epicbot.api.shared.model.Tile;
 import com.epicbot.api.shared.util.time.Time;
 import org.gusta.mixology.config.MixologySettings;
+import org.gusta.mixology.domain.HopperStock;
 import org.gusta.mixology.domain.PasteType;
 import org.gusta.mixology.stats.MixologyStats;
 
@@ -15,82 +16,60 @@ public class HopperService {
     private final MixologySettings settings;
     private final ObjectService objects;
     private final BankService bank;
+    private final HopperStockReader hopperStockReader;
     private final MixologyStats stats;
 
     public HopperService(
             MixologySettings settings,
             ObjectService objects,
             BankService bank,
+            HopperStockReader hopperStockReader,
             MixologyStats stats
     ) {
         this.settings = settings;
         this.objects = objects;
         this.bank = bank;
+        this.hopperStockReader = hopperStockReader;
         this.stats = stats;
     }
 
-    public boolean loadAvailablePaste(APIContext ctx) {
+    public boolean loadAvailablePaste(APIContext ctx, HopperStock beforeStock) {
         if (!bank.hasAnyPaste(ctx)) {
-            return false;
-        }
-
-        if (!moveToHopperLoadTile(ctx)) {
             return false;
         }
 
         int beforePaste = totalPaste(ctx);
         stats.setStatus("Loading paste into hopper");
-        boolean interacted = objects.interactByIdAtTileWithMinimap(ctx, settings.alchemicalSocietyArea(),
-                HOPPER_ID, "Hopper", HOPPER_TILE, HOPPER_APPROACH_TILE, "Deposit");
+        boolean interacted = objects.interactByIdAtTileSingleClick(ctx, settings.alchemicalSocietyArea(),
+                HOPPER_ID, "Hopper", HOPPER_TILE, HOPPER_APPROACH_TILE, 3, "Deposit");
         if (!interacted) {
             return false;
         }
 
-        Time.sleep(1200, 2000, () -> totalPaste(ctx) < beforePaste, 100);
-        return totalPaste(ctx) < beforePaste;
+        Time.sleep(3000, 5000,
+                () -> totalPaste(ctx) < beforePaste || hopperStockIncreased(ctx, beforeStock),
+                150);
+        boolean confirmed = totalPaste(ctx) < beforePaste || hopperStockIncreased(ctx, beforeStock);
+        if (!confirmed) {
+            stats.setStatus("Hopper deposit not confirmed; retrying safely");
+        }
+        return confirmed;
     }
 
-    private boolean moveToHopperLoadTile(APIContext ctx) {
-        if (HOPPER_APPROACH_TILE.tileDistanceTo(ctx) <= 1) {
-            return true;
-        }
-
-        if (ctx.bank().isOpen()) {
-            stats.setStatus("Closing bank before Hopper load tile");
-            ctx.bank().close();
-            Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
+    private boolean hopperStockIncreased(APIContext ctx, HopperStock beforeStock) {
+        if (beforeStock == null || !beforeStock.isComplete()) {
             return false;
         }
-        if (ctx.grandExchange().isOpen()) {
-            stats.setStatus("Closing GE before Hopper load tile");
-            ctx.grandExchange().close();
-            Time.sleep(500, 900, () -> !ctx.grandExchange().isOpen(), 100);
+        HopperStock currentStock = hopperStockReader.readStock(ctx).orElse(null);
+        if (currentStock == null || !currentStock.isComplete()) {
             return false;
         }
-        if (ctx.localPlayer().isMoving() || ctx.localPlayer().isAnimating()) {
-            stats.setStatus("Walking to Hopper load tile "
-                    + HOPPER_APPROACH_TILE.getX() + ","
-                    + HOPPER_APPROACH_TILE.getY() + ","
-                    + HOPPER_APPROACH_TILE.getPlane()
-                    + " dist=" + HOPPER_APPROACH_TILE.tileDistanceTo(ctx));
-            Time.sleep(650, 1000);
-            return false;
+        for (PasteType type : PasteType.values()) {
+            if (currentStock.amount(type) > beforeStock.amount(type)) {
+                return true;
+            }
         }
-
-        stats.setStatus("Walking to Hopper load tile "
-                + HOPPER_APPROACH_TILE.getX() + ","
-                + HOPPER_APPROACH_TILE.getY() + ","
-                + HOPPER_APPROACH_TILE.getPlane()
-                + " before deposit");
-        boolean walking = ctx.walking().walkTo(HOPPER_APPROACH_TILE);
-        if (!walking) {
-            ctx.webWalking().setUseTeleports(false);
-            ctx.webWalking().walkTo(HOPPER_APPROACH_TILE);
-        }
-        Time.sleep(900, 1500,
-                () -> ctx.localPlayer().isMoving() || HOPPER_APPROACH_TILE.tileDistanceTo(ctx) <= 1,
-                100);
-        return HOPPER_APPROACH_TILE.tileDistanceTo(ctx) <= 1;
+        return false;
     }
 
     private int totalPaste(APIContext ctx) {

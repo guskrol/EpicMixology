@@ -338,9 +338,14 @@ public class TravelService {
     }
 
     private boolean localGroundWalk(APIContext ctx, Tile target) {
-        return ctx.walking().walkOnScreen(target)
-                || target.interact("Walk here")
-                || target.click(true);
+        if (ctx.walking().walkOnScreen(target)) {
+            return true;
+        }
+        stats.setStatus("Local ground click failed for " + tileText(target)
+                + "; adjusting camera once");
+        ctx.camera().turnTo(target);
+        Time.sleep(350, 650);
+        return ctx.walking().walkOnScreen(target);
     }
 
     private boolean isSameTile(Tile left, Tile right) {

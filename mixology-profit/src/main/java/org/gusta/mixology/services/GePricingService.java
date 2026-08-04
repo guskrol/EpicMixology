@@ -15,7 +15,7 @@ public class GePricingService {
     private static final double BUY_MARKUP = 1.15D;
     private static final double SELL_MARKDOWN = 0.99D;
     private static final int ALDARIUM_ITEM_ID = 29993;
-    private static final long WIKI_PRICE_CACHE_MILLIS = 60 * 60_000L;
+    private static final long WIKI_PRICE_CACHE_MILLIS = 5 * 60_000L;
     private static final long WIKI_PRICE_FAILURE_RETRY_MILLIS = 5 * 60_000L;
     private static final String WIKI_LATEST_PRICE_URL =
             "https://prices.runescape.wiki/api/v1/osrs/latest?id=";

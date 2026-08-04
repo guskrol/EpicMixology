@@ -669,7 +669,7 @@ public class MixologyRunner implements ScriptModule {
             return;
         }
 
-        if (!hopper.loadAvailablePaste(ctx)) {
+        if (!hopper.loadAvailablePaste(ctx, liveStock)) {
             return;
         }
         markHopperFilledFromCarriedPaste();

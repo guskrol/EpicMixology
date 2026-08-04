@@ -117,7 +117,18 @@ public class SupervisorLaloService {
 
         logMissingLalo(ctx);
         stats.setStatus("Walking to Supervisor Lalo tile 1394,9314,0");
-        ctx.walking().walkTo(LALO_TILE);
+        boolean walking = LALO_TILE.tileDistanceTo(ctx) <= 12
+                && ctx.walking().walkOnScreen(LALO_TILE);
+        if (!walking) {
+            stats.setStatus("Local walk to Supervisor Lalo failed; adjusting camera once");
+            ctx.camera().turnTo(LALO_TILE);
+            Time.sleep(350, 650);
+            walking = ctx.walking().walkOnScreen(LALO_TILE);
+            if (!walking) {
+                stats.setStatus("Camera-assisted walk to Supervisor Lalo failed; minimap fallback");
+                ctx.walking().walkTo(LALO_TILE);
+            }
+        }
         Time.sleep(900, 1400,
                 () -> LALO_TILE.tileDistanceTo(ctx) <= 6 || ctx.localPlayer().isMoving(), 100);
         return false;

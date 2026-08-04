@@ -149,7 +149,21 @@ public class ObjectService {
             Tile approachTile,
             String... actions
     ) {
-        return interactByIdAtTile(ctx, area, id, label, objectTile, approachTile, false, actions);
+        return interactByIdAtTile(ctx, area, id, label, objectTile, approachTile, 1, false, false, actions);
+    }
+
+    public boolean interactByIdAtTileSingleClick(
+            APIContext ctx,
+            Area area,
+            int id,
+            String label,
+            Tile objectTile,
+            Tile approachTile,
+            int approachDistance,
+            String... actions
+    ) {
+        return interactByIdAtTile(ctx, area, id, label, objectTile, approachTile,
+                Math.max(1, approachDistance), false, true, actions);
     }
 
     public boolean interactByIdAtTileWithMinimap(
@@ -161,7 +175,7 @@ public class ObjectService {
             Tile approachTile,
             String... actions
     ) {
-        return interactByIdAtTile(ctx, area, id, label, objectTile, approachTile, true, actions);
+        return interactByIdAtTile(ctx, area, id, label, objectTile, approachTile, 1, true, false, actions);
     }
 
     private boolean interactByIdAtTile(
@@ -171,7 +185,9 @@ public class ObjectService {
             String label,
             Tile objectTile,
             Tile approachTile,
+            int approachDistance,
             boolean allowMinimapWalk,
+            boolean singleInteractionAttempt,
             String... actions
     ) {
         if (ctx.localPlayer().isMoving() || ctx.localPlayer().isAnimating()) {
@@ -183,12 +199,15 @@ public class ObjectService {
         SceneObject object = nearestByIdNearTile(ctx, area, id, objectTile);
         if (object != null && object.isValid()
                 && object.tileDistanceTo(ctx) <= MAX_DIRECT_OBJECT_INTERACT_DISTANCE) {
-            if (interactWithObject(ctx, object, id, label, actions)) {
+            boolean interacted = singleInteractionAttempt
+                    ? interactWithObjectOnce(ctx, object, id, label, actions)
+                    : interactWithObject(ctx, object, id, label, actions);
+            if (interacted) {
                 return true;
             }
         }
 
-        if (approachTile != null && approachTile.tileDistanceTo(ctx) > 1) {
+        if (approachTile != null && approachTile.tileDistanceTo(ctx) > approachDistance) {
             if (allowMinimapWalk) {
                 stats.setStatus("Minimap walking to " + label + " tile " + tileText(approachTile)
                         + " dist=" + approachTile.tileDistanceTo(ctx));
@@ -205,21 +224,24 @@ public class ObjectService {
 
             stats.setStatus("Ground-clicking " + label + " tile " + tileText(approachTile)
                     + " dist=" + approachTile.tileDistanceTo(ctx));
-            boolean walking = ctx.walking().walkOnScreen(approachTile)
-                    || approachTile.interact("Walk here")
-                    || approachTile.click(true);
+            boolean walking = ctx.walking().walkOnScreen(approachTile);
             if (!walking) {
                 if (area != null && area.contains(ctx.localPlayer().getLocation())) {
                     stats.setStatus("Local ground click failed for " + label
                             + " tile " + tileText(approachTile)
-                            + "; minimap fallback");
-                    walking = ctx.walking().walkTo(approachTile);
+                            + "; adjusting camera once");
+                    ctx.camera().turnTo(approachTile);
+                    Time.sleep(350, 650);
+                    walking = ctx.walking().walkOnScreen(approachTile);
                     if (!walking) {
-                        ctx.webWalking().setUseTeleports(false);
-                        ctx.webWalking().walkTo(approachTile);
+                        stats.setStatus("Camera-assisted local click failed for " + label
+                                + " tile " + tileText(approachTile)
+                                + "; minimap fallback");
+                        walking = ctx.walking().walkTo(approachTile);
                     }
                     Time.sleep(800, 1300,
-                            () -> ctx.localPlayer().isMoving() || approachTile.tileDistanceTo(ctx) <= 1,
+                            () -> ctx.localPlayer().isMoving()
+                                    || approachTile.tileDistanceTo(ctx) <= approachDistance,
                             100);
                     return false;
                 }
@@ -230,7 +252,8 @@ public class ObjectService {
                 }
             }
             Time.sleep(800, 1300,
-                    () -> ctx.localPlayer().isMoving() || approachTile.tileDistanceTo(ctx) <= 1,
+                    () -> ctx.localPlayer().isMoving()
+                            || approachTile.tileDistanceTo(ctx) <= approachDistance,
                     100);
             return false;
         }
@@ -246,7 +269,9 @@ public class ObjectService {
             return false;
         }
 
-        return interactWithObject(ctx, object, id, label, actions);
+        return singleInteractionAttempt
+                ? interactWithObjectOnce(ctx, object, id, label, actions)
+                : interactWithObject(ctx, object, id, label, actions);
     }
 
     private SceneObject nearestById(APIContext ctx, Area area, int id, String... actions) {
@@ -344,6 +369,37 @@ public class ObjectService {
         }
 
         stats.setStatus("Could not interact with id=" + id
+                + " label=" + label
+                + " name=" + object.getName()
+                + " tile=" + object.getLocation()
+                + " actions=" + object.getActions());
+        Time.sleep(900, 1300);
+        return false;
+    }
+
+    private boolean interactWithObjectOnce(
+            APIContext ctx,
+            SceneObject object,
+            int id,
+            String label,
+            String[] actions
+    ) {
+        for (String action : actions) {
+            if (!object.hasAction(action)) {
+                continue;
+            }
+            if (object.interact(action)) {
+                stats.setStatus("Interacting once: " + object.getName()
+                        + " id=" + id
+                        + " tile=" + object.getLocation()
+                        + " / " + action);
+                Time.sleep(700, 1200);
+                return true;
+            }
+            break;
+        }
+
+        stats.setStatus("Single interaction was not accepted for id=" + id
                 + " label=" + label
                 + " name=" + object.getName()
                 + " tile=" + object.getLocation()

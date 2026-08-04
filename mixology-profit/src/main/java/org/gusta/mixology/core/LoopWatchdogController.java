@@ -4,6 +4,8 @@ import com.epicbot.api.shared.APIContext;
 import com.epicbot.api.shared.entity.ItemWidget;
 import com.epicbot.api.shared.model.Skill;
 import com.epicbot.api.shared.model.Tile;
+import com.epicbot.api.shared.model.ge.GrandExchangeOffer;
+import com.epicbot.api.shared.model.ge.GrandExchangeSlot;
 import com.epicbot.api.shared.util.time.Time;
 import org.gusta.mixology.stats.MixologyStats;
 
@@ -317,6 +319,7 @@ public class LoopWatchdogController implements RuntimeController {
         private final int herbloreXp;
         private final int inventoryFingerprint;
         private final int equipmentFingerprint;
+        private final int grandExchangeFingerprint;
         private final long statsProgress;
         private final String state;
         private final String status;
@@ -326,6 +329,7 @@ public class LoopWatchdogController implements RuntimeController {
                 int herbloreXp,
                 int inventoryFingerprint,
                 int equipmentFingerprint,
+                int grandExchangeFingerprint,
                 long statsProgress,
                 String state,
                 String status,
@@ -334,6 +338,7 @@ public class LoopWatchdogController implements RuntimeController {
             this.herbloreXp = herbloreXp;
             this.inventoryFingerprint = inventoryFingerprint;
             this.equipmentFingerprint = equipmentFingerprint;
+            this.grandExchangeFingerprint = grandExchangeFingerprint;
             this.statsProgress = statsProgress;
             this.state = state == null ? "" : state;
             this.status = status == null ? "" : status;
@@ -345,6 +350,7 @@ public class LoopWatchdogController implements RuntimeController {
                     herbloreXp(ctx),
                     itemFingerprint(ctx.inventory().getItems()),
                     itemFingerprint(ctx.equipment().getItems()),
+                    grandExchangeFingerprint(ctx),
                     stats.progressScore(),
                     stats.state(),
                     stats.status(),
@@ -356,7 +362,32 @@ public class LoopWatchdogController implements RuntimeController {
             return herbloreXp != previous.herbloreXp
                     || inventoryFingerprint != previous.inventoryFingerprint
                     || equipmentFingerprint != previous.equipmentFingerprint
+                    || grandExchangeFingerprint != previous.grandExchangeFingerprint
                     || statsProgress != previous.statsProgress;
+        }
+
+        private static int grandExchangeFingerprint(APIContext ctx) {
+            int result = 17;
+            try {
+                for (GrandExchangeSlot slot : ctx.grandExchange().getSlots()) {
+                    if (slot == null || !slot.inUse()) {
+                        continue;
+                    }
+                    result = 31 * result + slot.getIndex();
+                    result = 31 * result + (slot.getState() == null ? 0 : slot.getState().ordinal());
+                    GrandExchangeOffer offer = slot.getOffer();
+                    if (offer == null) {
+                        continue;
+                    }
+                    result = 31 * result + offer.getItemId();
+                    result = 31 * result + offer.getPrice();
+                    result = 31 * result + offer.getCurrentQuantity();
+                    result = 31 * result + offer.getRemaining();
+                }
+            } catch (RuntimeException ignored) {
+                return result;
+            }
+            return result;
         }
 
         private static int herbloreXp(APIContext ctx) {

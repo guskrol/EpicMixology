@@ -63,23 +63,8 @@ public class ConveyorService {
         stats.debug("Timing conveyor delivery requested: expected=" + expectedOrders
                 + " matching=" + beforeMatching
                 + " ready=" + beforeReady);
-        boolean interacted = retryDeposit(ctx, expectedOrders, requiredBatch);
-        if (!interacted) {
-            return false;
-        }
-
-        stats.debug("Timing conveyor click accepted: elapsed="
-                + (System.currentTimeMillis() - deliveryStartedAt) + "ms");
-
-        Time.sleep(1200, 2200,
-                () -> potionInventory.readyPotionCount(ctx) < beforeReady,
-                100);
+        int delivered = deliverBatchAtConveyor(ctx, expectedOrders, deliveryStartedAt);
         int afterReady = potionInventory.readyPotionCount(ctx);
-        int delivered = Math.max(0, beforeReady - afterReady);
-        if (delivered > 0) {
-            stats.debug("Timing conveyor inventory updated: delivered=" + delivered
-                    + " elapsed=" + (System.currentTimeMillis() - deliveryStartedAt) + "ms");
-        }
         if (delivered < expectedOrders) {
             stats.setStatus("Conveyor accepted only " + delivered
                     + "/" + expectedOrders
@@ -94,6 +79,46 @@ public class ConveyorService {
                 + " expected=" + expectedOrders
                 + " elapsed=" + (System.currentTimeMillis() - deliveryStartedAt) + "ms"
                 + " remainingReady=" + afterReady);
+        stats.recordOrdersCompleted(1);
+        return true;
+    }
+
+    public boolean depositTargetOrder(APIContext ctx, PotionOrder target) {
+        if (target == null || !target.isComplete()) {
+            return false;
+        }
+
+        PotionRecipe recipe = target.recipe();
+        int beforeTarget = potionInventory.potionCount(ctx, recipe);
+        if (beforeTarget <= 0) {
+            stats.setStatus("Target recovery potion is no longer in inventory: " + target.label());
+            return false;
+        }
+
+        int beforeReady = potionInventory.readyPotionCount(ctx);
+        stats.setStatus("Depositing isolated target potion: " + target.label());
+        if (!retryDeposit(ctx, 1, 1)) {
+            return false;
+        }
+
+        Time.sleep(1200, 2200,
+                () -> potionInventory.potionCount(ctx, recipe) < beforeTarget
+                        || potionInventory.readyPotionCount(ctx) < beforeReady,
+                100);
+        int afterTarget = potionInventory.potionCount(ctx, recipe);
+        int afterReady = potionInventory.readyPotionCount(ctx);
+        if (afterTarget >= beforeTarget) {
+            stats.setStatus("Target potion deposit was not confirmed: " + target.label());
+            stats.debug("Target conveyor recovery changed ready count "
+                    + beforeReady + " -> " + afterReady
+                    + " but target " + recipe.code() + " stayed "
+                    + beforeTarget + " -> " + afterTarget);
+            return false;
+        }
+
+        stats.debug("Isolated target potion delivered: " + target.label()
+                + " target=" + beforeTarget + " -> " + afterTarget
+                + " ready=" + beforeReady + " -> " + afterReady);
         stats.recordOrdersCompleted(1);
         return true;
     }
@@ -194,6 +219,37 @@ public class ConveyorService {
         return false;
     }
 
+    private int deliverBatchAtConveyor(APIContext ctx, int expectedOrders, long deliveryStartedAt) {
+        int delivered = 0;
+        while (delivered < expectedOrders) {
+            int beforeReady = potionInventory.readyPotionCount(ctx);
+            if (beforeReady <= 0 || !retryDeposit(ctx, 1, 1)) {
+                break;
+            }
+
+            int deliveryNumber = delivered + 1;
+            stats.debug("Timing conveyor batch click accepted: item="
+                    + deliveryNumber + "/" + expectedOrders
+                    + " elapsed=" + (System.currentTimeMillis() - deliveryStartedAt) + "ms");
+            Time.sleep(1200, 2200,
+                    () -> potionInventory.readyPotionCount(ctx) < beforeReady,
+                    100);
+            int afterReady = potionInventory.readyPotionCount(ctx);
+            int accepted = Math.max(0, beforeReady - afterReady);
+            if (accepted <= 0) {
+                stats.setStatus("Conveyor batch click was not confirmed; keeping remaining potions tracked");
+                break;
+            }
+
+            delivered += accepted;
+            stats.debug("Timing conveyor batch inventory updated: delivered=" + delivered
+                    + "/" + expectedOrders
+                    + " lastAccepted=" + accepted
+                    + " elapsed=" + (System.currentTimeMillis() - deliveryStartedAt) + "ms");
+        }
+        return Math.min(delivered, expectedOrders);
+    }
+
     private boolean interactConveyor(APIContext ctx) {
         return objects.interactByIdAtTile(ctx, settings.mixingRoomArea(),
                 CONVEYOR_BELT_ID, "Conveyor belt", CONVEYOR_BELT_TILE,
@@ -221,13 +277,18 @@ public class ConveyorService {
                 + tileText(CONVEYOR_BELT_APPROACH_TILE)
                 + " before fulfil; dist=" + distance);
         boolean walking = distance <= 12
-                && (ctx.walking().walkOnScreen(CONVEYOR_BELT_APPROACH_TILE)
-                || CONVEYOR_BELT_APPROACH_TILE.interact("Walk here")
-                || CONVEYOR_BELT_APPROACH_TILE.click(true));
+                && ctx.walking().walkOnScreen(CONVEYOR_BELT_APPROACH_TILE);
         if (!walking) {
-            stats.setStatus("Local ground click failed for conveyor delivery tile; minimap fallback "
+            stats.setStatus("Local ground click failed for conveyor delivery tile; adjusting camera once "
                     + tileText(CONVEYOR_BELT_APPROACH_TILE));
-            ctx.walking().walkTo(CONVEYOR_BELT_APPROACH_TILE);
+            ctx.camera().turnTo(CONVEYOR_BELT_APPROACH_TILE);
+            Time.sleep(350, 650);
+            walking = ctx.walking().walkOnScreen(CONVEYOR_BELT_APPROACH_TILE);
+            if (!walking) {
+                stats.setStatus("Camera-assisted conveyor click failed; minimap fallback "
+                        + tileText(CONVEYOR_BELT_APPROACH_TILE));
+                ctx.walking().walkTo(CONVEYOR_BELT_APPROACH_TILE);
+            }
             Time.sleep(900, 1500,
                     () -> ctx.localPlayer().isMoving()
                             || CONVEYOR_BELT_APPROACH_TILE.tileDistanceTo(ctx) <= DELIVERY_TILE_READY_DISTANCE,

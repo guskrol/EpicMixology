@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ThreadLocalRandom;
 
 public class AldariumRewardService {
     private static final String ALDARIUM = "Aldarium";
@@ -42,6 +43,11 @@ public class AldariumRewardService {
     private static final int MAX_REWARD_OPEN_ATTEMPTS = 10;
     private static final int REWARD_SCROLL_ATTEMPTS = 12;
     private static final int REWARD_SCROLL_BATCH = 7;
+    private static final int MAX_SELL_REPRICE_ATTEMPTS = 2;
+    private static final int MIN_SELL_REPRICE_DELAY_MILLIS = 10_000;
+    private static final int MAX_SELL_REPRICE_DELAY_MILLIS = 20_000;
+    private static final int MIN_SELL_MARKDOWN_PERCENT = 10;
+    private static final int MAX_SELL_MARKDOWN_PERCENT = 15;
 
     private final MixologySettings settings;
     private final MixologyStats stats;
@@ -53,6 +59,9 @@ public class AldariumRewardService {
     private int currentSellPrice;
     private long nextSellCollectAt;
     private long sellOfferPlacedAt;
+    private long sellOfferRepriceAt;
+    private int sellRepriceAttempts;
+    private boolean pendingSellRelist;
     private long nextRingTeleportAttemptAt;
     private long nextDiagnosticAt;
     private boolean geCheckedForAldariumOffer;
@@ -79,6 +88,9 @@ public class AldariumRewardService {
         currentSellPrice = 0;
         nextSellCollectAt = 0L;
         sellOfferPlacedAt = 0L;
+        sellOfferRepriceAt = 0L;
+        sellRepriceAttempts = 0;
+        pendingSellRelist = false;
         nextRingTeleportAttemptAt = 0L;
         geCheckedForAldariumOffer = false;
         rewardListScrollsForClaim = 0;
@@ -136,7 +148,18 @@ public class AldariumRewardService {
         NPC lalo = findRewardLalo(ctx);
         if (lalo == null || !lalo.isValid() || lalo.tileDistanceTo(ctx) > 7) {
             stats.setStatus("Walking to Supervisor Lalo rewards tile 1395,9311,0");
-            ctx.walking().walkTo(REWARD_LALO_TILE);
+            boolean walking = REWARD_LALO_TILE.tileDistanceTo(ctx) <= 12
+                    && ctx.walking().walkOnScreen(REWARD_LALO_TILE);
+            if (!walking) {
+                stats.setStatus("Local walk to Supervisor Lalo rewards failed; adjusting camera once");
+                ctx.camera().turnTo(REWARD_LALO_TILE);
+                Time.sleep(350, 650);
+                walking = ctx.walking().walkOnScreen(REWARD_LALO_TILE);
+                if (!walking) {
+                    stats.setStatus("Camera-assisted walk to Supervisor Lalo rewards failed; minimap fallback");
+                    ctx.walking().walkTo(REWARD_LALO_TILE);
+                }
+            }
             Time.sleep(900, 1400,
                     () -> REWARD_LALO_TILE.tileDistanceTo(ctx) <= 6 || ctx.localPlayer().isMoving(),
                     100);
@@ -221,10 +244,15 @@ public class AldariumRewardService {
             return false;
         }
 
-        currentSellPrice = Math.max(1, pricing.aldariumRealtimePrice(ctx, 6_000L));
+        if (currentSellPrice <= 0 || sellRepriceAttempts <= 0) {
+            currentSellPrice = Math.max(1, pricing.aldariumRealtimePrice(ctx, 6_000L));
+        }
         stats.setAldariumUnitPrice(currentSellPrice);
         stats.setStatus("Selling " + inventoryAldarium + "x Aldarium at "
-                + currentSellPrice + " each before herb restock");
+                + currentSellPrice + " each before herb restock"
+                + (sellRepriceAttempts > 0
+                ? " (reprice " + sellRepriceAttempts + "/" + MAX_SELL_REPRICE_ATTEMPTS + ")"
+                : ""));
         boolean placed = ctx.grandExchange().placeSellOffer(ALDARIUM, inventoryAldarium, currentSellPrice);
         if (!placed) {
             stats.setStatus("Aldarium sell offer was not placed; retrying");
@@ -233,8 +261,13 @@ public class AldariumRewardService {
         }
 
         sellOfferPlaced = true;
+        pendingSellRelist = false;
         sellOfferPlacedAt = System.currentTimeMillis();
+        sellOfferRepriceAt = sellOfferPlacedAt + randomSellRepriceDelayMillis();
         nextSellCollectAt = System.currentTimeMillis() + 5_000L;
+        stats.debug("Aldarium sell offer accepted: price=" + currentSellPrice
+                + " repriceAttempt=" + sellRepriceAttempts
+                + " repriceAfter=" + (sellOfferRepriceAt - sellOfferPlacedAt) + "ms");
         Time.sleep(1000, 1500);
         return false;
     }
@@ -745,7 +778,13 @@ public class AldariumRewardService {
         slot = findAldariumOffer(ctx);
         if (slot == null) {
             collectGeToBank(ctx);
-            sellOfferPlaced = false;
+            if (pendingSellRelist) {
+                sellOfferPlaced = false;
+                bankCheckedForAldarium = false;
+                stats.setStatus("Aborted Aldarium offer cleared; recovering items for lower relist");
+                return false;
+            }
+            clearCompletedSellState();
             geCheckedForAldariumOffer = true;
             bankCheckedForAldarium = false;
             stats.setStatus("Aldarium GE offer clear; auditing bank before restock");
@@ -757,7 +796,13 @@ public class AldariumRewardService {
             collectGeToBank(ctx);
             Time.sleep(700, 1100);
             if (findAldariumOffer(ctx) == null) {
-                sellOfferPlaced = false;
+                if (pendingSellRelist) {
+                    sellOfferPlaced = false;
+                    bankCheckedForAldarium = false;
+                    stats.setStatus("Aborted Aldarium offer collected; preparing lower relist");
+                    return false;
+                }
+                clearCompletedSellState();
                 geCheckedForAldariumOffer = true;
                 bankCheckedForAldarium = false;
                 stats.setStatus("Aldarium sale collected; auditing bank before restock");
@@ -766,15 +811,47 @@ public class AldariumRewardService {
             return false;
         }
 
-        if (System.currentTimeMillis() - sellOfferPlacedAt > 45_000L && currentSellPrice > 1) {
-            stats.setStatus("Aldarium sale slow; aborting and relisting lower");
+        if (sellOfferPlacedAt <= 0L || sellOfferRepriceAt <= 0L || currentSellPrice <= 0) {
+            GrandExchangeOffer offer = slot.getOffer();
+            int offerPrice = offer == null ? 0 : offer.getPrice();
+            currentSellPrice = offerPrice > 0
+                    ? offerPrice
+                    : Math.max(1, pricing.aldariumRealtimePrice(ctx, 6_000L));
+            sellOfferPlaced = true;
+            sellOfferPlacedAt = System.currentTimeMillis();
+            sellOfferRepriceAt = sellOfferPlacedAt + randomSellRepriceDelayMillis();
+            stats.setAldariumUnitPrice(currentSellPrice);
+            stats.debug("Recovered existing Aldarium sell offer monitoring: price="
+                    + currentSellPrice
+                    + " repriceAfter=" + (sellOfferRepriceAt - sellOfferPlacedAt) + "ms");
+        }
+
+        if (System.currentTimeMillis() >= sellOfferRepriceAt
+                && sellRepriceAttempts < MAX_SELL_REPRICE_ATTEMPTS
+                && currentSellPrice > 1) {
+            int markdownPercent = ThreadLocalRandom.current().nextInt(
+                    MIN_SELL_MARKDOWN_PERCENT,
+                    MAX_SELL_MARKDOWN_PERCENT + 1);
+            int reducedPrice = Math.max(1,
+                    (int) Math.floor(currentSellPrice * (100 - markdownPercent) / 100.0D));
+            stats.setStatus("Aldarium sale slow; aborting and relisting "
+                    + markdownPercent + "% lower at " + reducedPrice);
             if (slot.abortOffer()) {
                 Time.sleep(900, 1400);
                 collectGeToBank(ctx);
-                currentSellPrice = Math.max(1, (int) Math.floor(currentSellPrice * 0.95D));
+                int previousPrice = currentSellPrice;
+                currentSellPrice = reducedPrice;
+                sellRepriceAttempts++;
                 stats.setAldariumUnitPrice(currentSellPrice);
                 sellOfferPlaced = false;
+                sellOfferPlacedAt = 0L;
+                sellOfferRepriceAt = 0L;
+                pendingSellRelist = true;
                 bankCheckedForAldarium = false;
+                stats.debug("Aldarium sell offer repriced: attempt=" + sellRepriceAttempts
+                        + "/" + MAX_SELL_REPRICE_ATTEMPTS
+                        + " markdown=" + markdownPercent + "%"
+                        + " price=" + previousPrice + "->" + currentSellPrice);
             }
             return false;
         }
@@ -786,6 +863,22 @@ public class AldariumRewardService {
         stats.setStatus("Waiting for Aldarium sale before herb restock");
         nextSellCollectAt = System.currentTimeMillis() + 5_000L;
         return false;
+    }
+
+    private long randomSellRepriceDelayMillis() {
+        return ThreadLocalRandom.current().nextLong(
+                MIN_SELL_REPRICE_DELAY_MILLIS,
+                MAX_SELL_REPRICE_DELAY_MILLIS + 1L);
+    }
+
+    private void clearCompletedSellState() {
+        sellOfferPlaced = false;
+        currentSellPrice = 0;
+        nextSellCollectAt = 0L;
+        sellOfferPlacedAt = 0L;
+        sellOfferRepriceAt = 0L;
+        sellRepriceAttempts = 0;
+        pendingSellRelist = false;
     }
 
     private boolean checkGrandExchangeForAldariumBeforeHerbs(APIContext ctx) {
