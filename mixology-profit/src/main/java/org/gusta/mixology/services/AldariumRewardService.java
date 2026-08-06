@@ -1,5 +1,6 @@
 package org.gusta.mixology.services;
 
+import com.epicbot.api.gameval.ItemID;
 import com.epicbot.api.gameval.VarPlayerID;
 import com.epicbot.api.shared.APIContext;
 import com.epicbot.api.shared.entity.ItemWidget;
@@ -29,7 +30,9 @@ public class AldariumRewardService {
     private static final int REWARD_LALO_ID = 13921;
     private static final Tile REWARD_LALO_TILE = new Tile(1395, 9311, 0);
     private static final int REWARD_SHOP_GROUP = 819;
+    private static final int REWARD_LIST_VIEWPORT_CHILD = 15;
     private static final int REWARD_LIST_CHILD = 34;
+    private static final int REWARD_LIST_SCROLLER_CHILD = 35;
     private static final int ALDARIUM_LIST_WIDGET_CHILD = 132;
     private static final int BUY_50_CHILD = 25;
     private static final int ALDARIUM_MOX_COST = 80;
@@ -41,8 +44,10 @@ public class AldariumRewardService {
     private static final int GE_MAX_Y = 3505;
     private static final Tile GRAND_EXCHANGE_WALK_TILE = new Tile(3164, 3487, 0);
     private static final int MAX_REWARD_OPEN_ATTEMPTS = 10;
-    private static final int REWARD_SCROLL_ATTEMPTS = 12;
-    private static final int REWARD_SCROLL_BATCH = 7;
+    private static final int REWARD_SCROLL_ATTEMPTS = 4;
+    private static final int REWARD_SCROLL_BATCH = 3;
+    private static final int MAX_ALDARIUM_SELECTION_CLICKS = 2;
+    private static final long ALDARIUM_SELECTION_CONFIRM_TIMEOUT_MILLIS = 2_500L;
     private static final int MAX_SELL_REPRICE_ATTEMPTS = 2;
     private static final int MIN_SELL_REPRICE_DELAY_MILLIS = 10_000;
     private static final int MAX_SELL_REPRICE_DELAY_MILLIS = 20_000;
@@ -66,8 +71,11 @@ public class AldariumRewardService {
     private long nextDiagnosticAt;
     private boolean geCheckedForAldariumOffer;
     private int rewardListScrollsForClaim;
+    private int rewardListNoProgressAttempts;
     private boolean rewardListScrolledForAldarium;
     private boolean aldariumSelectionAttempted;
+    private int aldariumSelectionClicks;
+    private long aldariumSelectionAttemptedAt;
     private boolean aldariumSelectedForClaim;
     private boolean depositClaimedAldarium;
 
@@ -94,8 +102,11 @@ public class AldariumRewardService {
         nextRingTeleportAttemptAt = 0L;
         geCheckedForAldariumOffer = false;
         rewardListScrollsForClaim = 0;
+        rewardListNoProgressAttempts = 0;
         rewardListScrolledForAldarium = false;
         aldariumSelectionAttempted = false;
+        aldariumSelectionClicks = 0;
+        aldariumSelectionAttemptedAt = 0L;
         aldariumSelectedForClaim = false;
         depositClaimedAldarium = false;
     }
@@ -121,8 +132,11 @@ public class AldariumRewardService {
         }
 
         rewardListScrollsForClaim = 0;
+        rewardListNoProgressAttempts = 0;
         rewardListScrolledForAldarium = false;
         aldariumSelectionAttempted = false;
+        aldariumSelectionClicks = 0;
+        aldariumSelectionAttemptedAt = 0L;
         aldariumSelectedForClaim = false;
         depositClaimedAldarium = false;
 
@@ -288,15 +302,42 @@ public class AldariumRewardService {
             return true;
         }
 
+        WidgetChild directBuyFifty = findAldariumBuyFiftyActionWidget(ctx);
+        if (directBuyFifty != null) {
+            stats.setStatus("Buying visible Aldarium directly with Buy-50");
+            int bought = buyAldariumWithBuyFiftyUntilLyeBelowCost(ctx);
+            if (bought > 0 || readLyeResin(ctx) < ALDARIUM_LYE_COST) {
+                return finishAldariumClaim(ctx, bought, balance);
+            }
+            stats.debug("Direct Aldarium Buy-50 was not confirmed; falling back to item selection");
+        }
+
         if (!aldariumSelectedForClaim) {
             aldariumSelectedForClaim = confirmAldariumSelected(ctx);
+        }
+        if (!aldariumSelectedForClaim && aldariumSelectionAttempted) {
+            long elapsed = System.currentTimeMillis() - aldariumSelectionAttemptedAt;
+            if (elapsed < ALDARIUM_SELECTION_CONFIRM_TIMEOUT_MILLIS) {
+                stats.setStatus("Waiting for Aldarium details panel confirmation");
+                Time.sleep(350, 600);
+                return false;
+            }
+            if (aldariumSelectionClicks >= MAX_ALDARIUM_SELECTION_CLICKS) {
+                stats.setStatus("Aldarium selection was not confirmed; reopening reward shop safely");
+                logAldariumSelectionDiagnostic(ctx);
+                closeRewardShop(ctx);
+                return false;
+            }
+            aldariumSelectionAttempted = false;
+            aldariumSelectionAttemptedAt = 0L;
         }
         if (!aldariumSelectedForClaim && !aldariumSelectionAttempted) {
             WidgetChild aldarium = ensureAldariumVisible(ctx);
             if (aldarium == null || !aldarium.isValid() || !aldarium.isVisible()) {
                 if (rewardListScrolledForAldarium) {
-                    stats.setStatus("Aldarium is not clickable after left reward list scroll; retrying");
+                    stats.setStatus("Aldarium was not resolved after verified scrolling; reopening reward shop");
                     logRewardWidgetDiagnostic(ctx);
+                    closeRewardShop(ctx);
                 }
                 return false;
             }
@@ -316,9 +357,13 @@ public class AldariumRewardService {
         }
 
         int bought = buyAldariumWithBuyFiftyUntilLyeBelowCost(ctx);
+        return finishAldariumClaim(ctx, bought, balance);
+    }
+
+    private boolean finishAldariumClaim(APIContext ctx, int bought, ResinBalance initialBalance) {
         ResinBalance finalBalance = readResinBalance(ctx);
         stats.setStatus("Aldarium reward claim complete: bought=" + bought
-                + " from " + balance.summary()
+                + " from " + initialBalance.summary()
                 + (finalBalance == null ? "" : " to " + finalBalance.summary()));
         closeRewardShop(ctx);
         if (inventoryCount(ctx, ALDARIUM) > 0) {
@@ -428,8 +473,11 @@ public class AldariumRewardService {
 
     private void resetRewardShopSelectionState() {
         rewardListScrollsForClaim = 0;
+        rewardListNoProgressAttempts = 0;
         rewardListScrolledForAldarium = false;
         aldariumSelectionAttempted = false;
+        aldariumSelectionClicks = 0;
+        aldariumSelectionAttemptedAt = 0L;
         aldariumSelectedForClaim = false;
     }
 
@@ -448,15 +496,19 @@ public class AldariumRewardService {
             return false;
         }
 
+        int selectedBefore = safeVarp(ctx, VarPlayerID.OMNISHOP_SELECTED_ID);
         stats.setStatus("Selecting Aldarium once in Mixology reward shop");
-        boolean clicked = clickAldariumInsideRewardList(ctx, aldarium);
-        if (!clicked) {
-            clicked = aldarium.interact("Select", ALDARIUM)
-                    || aldarium.interact("Select");
-        }
+        boolean clicked = aldarium.interact("Select", ALDARIUM)
+                || aldarium.interact("Select")
+                || clickAldariumInsideRewardList(ctx, aldarium);
         if (clicked) {
             aldariumSelectionAttempted = true;
-            Time.sleep(450, 750);
+            aldariumSelectionClicks++;
+            aldariumSelectionAttemptedAt = System.currentTimeMillis();
+            Time.sleep(450, 750, () -> isAldariumSelected(ctx), 100);
+            stats.debug("Aldarium selection click accepted: itemId=" + safeItemId(aldarium)
+                    + " selectedVarp=" + selectedBefore + "->"
+                    + safeVarp(ctx, VarPlayerID.OMNISHOP_SELECTED_ID));
         }
         return clicked;
     }
@@ -470,8 +522,10 @@ public class AldariumRewardService {
     }
 
     private boolean isAldariumSelected(APIContext ctx) {
+        int selectedItemId = safeVarp(ctx, VarPlayerID.OMNISHOP_SELECTED_ID);
         String rightText = rightRewardPanelText(ctx).toLowerCase(Locale.ROOT);
-        return rightText.contains("aldarium")
+        return selectedItemId == ItemID.ALDARIUM
+                || rightText.contains("aldarium")
                 || findRightPanelAldariumWidget(ctx) != null;
     }
 
@@ -482,78 +536,137 @@ public class AldariumRewardService {
             return null;
         }
 
-        if (!rewardListScrolledForAldarium) {
-            if (rewardListScrollsForClaim >= REWARD_SCROLL_ATTEMPTS) {
-                rewardListScrolledForAldarium = true;
-            } else {
-                rewardListScrollsForClaim++;
-                stats.setStatus("Scrolling Mixology Rewards left list to Aldarium "
-                        + rewardListScrollsForClaim + "/" + REWARD_SCROLL_ATTEMPTS);
-                scrollRewardListDown(ctx);
-                Time.sleep(500, 800);
-                return null;
-            }
-        }
-
         WidgetChild aldarium = findAldariumShopWidget(ctx);
         if (isAldariumClickableInRewardList(ctx, aldarium)) {
+            rewardListNoProgressAttempts = 0;
             return aldarium;
         }
 
-        for (int attempt = 0; attempt < 3; attempt++) {
-            stats.setStatus("Scrolling Mixology Rewards to Aldarium "
-                    + (attempt + 1) + "/3 after widget was not clickable");
-            scrollRewardListDown(ctx);
-            Time.sleep(500, 800, () -> {
-                WidgetChild visible = findAldariumShopWidget(ctx);
-                return isAldariumClickableInRewardList(ctx, visible);
-            }, 100);
-            aldarium = findAldariumShopWidget(ctx);
-            if (isAldariumClickableInRewardList(ctx, aldarium)) {
-                return aldarium;
-            }
+        if (rewardListScrollsForClaim >= REWARD_SCROLL_ATTEMPTS
+                || rewardListNoProgressAttempts >= 2) {
+            rewardListScrolledForAldarium = true;
+            return null;
+        }
+
+        WidgetChild rewardList = ctx.widgets().get(REWARD_SHOP_GROUP, REWARD_LIST_CHILD);
+        String beforeFingerprint = rewardListFingerprint(ctx);
+        stats.setStatus("Scrolling Mixology Rewards to Aldarium "
+                + (rewardListScrollsForClaim + 1) + "/" + REWARD_SCROLL_ATTEMPTS);
+
+        boolean requested;
+        if (rewardListNoProgressAttempts == 0) {
+            requested = scrollRewardListDown(ctx);
+        } else {
+            requested = scrollRewardScrollbarDown(ctx);
+        }
+        if (!requested) {
+            stats.debug("Mixology reward list controls were unavailable for scrolling");
+        }
+
+        Time.sleep(550, 900, () -> {
+            WidgetChild freshAldarium = findAldariumShopWidget(ctx);
+            return isAldariumClickableInRewardList(ctx, freshAldarium)
+                    || !beforeFingerprint.equals(rewardListFingerprint(ctx));
+        }, 100);
+
+        WidgetChild freshAldarium = findAldariumShopWidget(ctx);
+        if (isAldariumClickableInRewardList(ctx, freshAldarium)) {
+            rewardListNoProgressAttempts = 0;
+            return freshAldarium;
+        }
+
+        String afterFingerprint = rewardListFingerprint(ctx);
+        if (!beforeFingerprint.equals(afterFingerprint)) {
+            rewardListScrollsForClaim++;
+            rewardListNoProgressAttempts = 0;
+        } else {
+            rewardListNoProgressAttempts++;
+            stats.debug("Mixology reward list did not move while searching for Aldarium; noProgress="
+                    + rewardListNoProgressAttempts + "/2");
         }
         return null;
     }
 
-    private void scrollRewardListDown(APIContext ctx) {
+    private boolean scrollRewardListDown(APIContext ctx) {
         Rectangle bounds = rewardListViewportBounds(ctx);
-        if (bounds != null && bounds.width > 0 && bounds.height > 0) {
-            Point target = new Point(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
-            ctx.mouse().move(target);
-            Time.sleep(120, 240);
+        if (bounds == null || bounds.width <= 0 || bounds.height <= 0) {
+            return false;
         }
+
+        Point target = new Point(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        stats.debug("Scrolling Mixology reward list with mouse wheel at " + target
+                + " viewport=" + bounds);
+        ctx.mouse().move(target);
+        Time.sleep(120, 240);
         ctx.mouse().scroll(false, REWARD_SCROLL_BATCH);
+        return true;
+    }
+
+    private boolean scrollRewardScrollbarDown(APIContext ctx) {
+        WidgetChild scroller = ctx.widgets().get(REWARD_SHOP_GROUP, REWARD_LIST_SCROLLER_CHILD);
+        Rectangle bounds = safeBounds(scroller);
+        if (bounds == null || bounds.width <= 0 || bounds.height <= 0) {
+            return false;
+        }
+
+        int inset = Math.max(4, Math.min(10, bounds.height / 8));
+        Point target = new Point(bounds.x + bounds.width / 2, bounds.y + bounds.height - inset);
+        stats.debug("Reward list wheel made no progress; clicking scrollbar down control at " + target
+                + " scroller=" + bounds);
+        ctx.mouse().move(target);
+        Time.sleep(120, 240);
+        return ctx.mouse().click(target, false);
+    }
+
+    private String rewardListFingerprint(APIContext ctx) {
+        WidgetChild rewardList = ctx.widgets().get(REWARD_SHOP_GROUP, REWARD_LIST_CHILD);
+        Rectangle listBounds = rewardListViewportBounds(ctx);
+        StringBuilder fingerprint = new StringBuilder();
+        if (rewardList != null && rewardList.isValid()) {
+            fingerprint.append("scroll=").append(rewardList.getScrollY());
+        }
+        if (listBounds == null) {
+            return fingerprint.toString();
+        }
+        List<WidgetChild> visibleWidgets = new ArrayList<>(ctx.widgets().getAllChildren(candidate -> candidate != null
+                && candidate.isValid()
+                && candidate.isVisible()
+                && widgetGroup(candidate) == REWARD_SHOP_GROUP));
+        List<String> entries = new ArrayList<>();
+        for (WidgetChild widget : visibleWidgets) {
+            try {
+                Rectangle bounds = safeBounds(widget);
+                if (bounds == null || !listBounds.intersects(bounds)) {
+                    continue;
+                }
+                entries.add(widget.getChildId() + ":"
+                        + widget.getIndex() + ":"
+                        + bounds.x + "," + bounds.y + ":"
+                        + widgetTextAndName(widget));
+            } catch (RuntimeException ignored) {
+                // The reward shop can replace individual children while scrolling.
+            }
+        }
+        entries.sort(String::compareTo);
+        for (String entry : entries) {
+            fingerprint.append('|').append(entry);
+        }
+        return fingerprint.toString();
     }
 
     private Rectangle rewardListViewportBounds(APIContext ctx) {
-        WidgetChild rewardList = ctx.widgets().get(REWARD_SHOP_GROUP, REWARD_LIST_CHILD);
-        Rectangle bounds = safeBounds(rewardList);
+        WidgetChild viewport = ctx.widgets().get(REWARD_SHOP_GROUP, REWARD_LIST_VIEWPORT_CHILD);
+        Rectangle bounds = safeBounds(viewport);
         if (bounds != null && bounds.width > 0 && bounds.height > 0) {
-            Rectangle shop = rewardShopBounds(ctx);
-            if (shop == null || shop.width <= 0 || shop.height <= 0) {
-                return bounds;
-            }
-            Rectangle leftShopArea = new Rectangle(
-                    shop.x,
-                    shop.y,
-                    Math.max(120, (int) Math.round(shop.width * 0.56D)),
-                    shop.height
-            );
-            Rectangle visibleList = bounds.intersection(leftShopArea);
-            return visibleList.isEmpty() ? bounds : visibleList;
+            return bounds;
         }
 
-        Rectangle shop = rewardShopBounds(ctx);
-        if (shop == null || shop.width <= 0 || shop.height <= 0) {
-            return null;
+        WidgetChild rewardList = ctx.widgets().get(REWARD_SHOP_GROUP, REWARD_LIST_CHILD);
+        bounds = safeBounds(rewardList);
+        if (bounds != null && bounds.width > 0 && bounds.height > 0) {
+            return bounds;
         }
-        return new Rectangle(
-                shop.x + Math.max(8, (int) Math.round(shop.width * 0.02D)),
-                shop.y + Math.max(55, (int) Math.round(shop.height * 0.18D)),
-                Math.max(120, (int) Math.round(shop.width * 0.52D)),
-                Math.max(120, (int) Math.round(shop.height * 0.70D))
-        );
+        return null;
     }
 
     private Rectangle rewardShopBounds(APIContext ctx) {
@@ -585,11 +698,6 @@ public class AldariumRewardService {
             }
             if (beforeBalance.lye < ALDARIUM_LYE_COST) {
                 stats.setStatus("Lye resin below Aldarium cost: " + beforeBalance.summary());
-                break;
-            }
-
-            if (!aldariumSelectedForClaim && !confirmAldariumSelected(ctx)) {
-                stats.setStatus("Aldarium is not selected before Buy-50; stopping safely");
                 break;
             }
 
@@ -626,9 +734,71 @@ public class AldariumRewardService {
     }
 
     private boolean buyFiftyAldarium(APIContext ctx) {
+        WidgetChild aldariumBuyFifty = findAldariumBuyFiftyActionWidget(ctx);
+        if (aldariumBuyFifty != null) {
+            stats.debug("Using Aldarium card context action Buy-50: " + widgetSummary(aldariumBuyFifty));
+            if (buyFiftyFromRandomCardPoint(ctx, aldariumBuyFifty)) {
+                return true;
+            }
+        }
+
+        if (!aldariumSelectedForClaim && !confirmAldariumSelected(ctx)) {
+            return false;
+        }
         WidgetChild button = findBuyFiftyButton(ctx);
         return clickBuyButton(button, "Buy-50")
                 || ctx.store().buyFifty(ALDARIUM);
+    }
+
+    private boolean buyFiftyFromRandomCardPoint(APIContext ctx, WidgetChild card) {
+        Rectangle bounds = safeBounds(card);
+        Rectangle viewport = rewardListViewportBounds(ctx);
+        if (bounds == null || viewport == null) {
+            return card.interact("Buy-50", ALDARIUM)
+                    || card.interact("Buy-50");
+        }
+
+        Rectangle clickArea = bounds.intersection(viewport);
+        if (clickArea.width < 12 || clickArea.height < 12) {
+            return card.interact("Buy-50", ALDARIUM)
+                    || card.interact("Buy-50");
+        }
+
+        int insetX = Math.max(6, Math.min(18, clickArea.width / 5));
+        int insetY = Math.max(6, Math.min(14, clickArea.height / 5));
+        int minX = clickArea.x + insetX;
+        int maxX = clickArea.x + clickArea.width - insetX - 1;
+        int minY = clickArea.y + insetY;
+        int maxY = clickArea.y + clickArea.height - insetY - 1;
+        if (maxX <= minX || maxY <= minY) {
+            return card.interact("Buy-50", ALDARIUM)
+                    || card.interact("Buy-50");
+        }
+
+        Point target = new Point(
+                ThreadLocalRandom.current().nextInt(minX, maxX + 1),
+                ThreadLocalRandom.current().nextInt(minY, maxY + 1));
+        stats.debug("Opening Aldarium context menu at varied card point " + target
+                + " safeArea=" + clickArea);
+        ctx.mouse().move(target);
+        Time.sleep(140, 280);
+        if (!ctx.mouse().click(target, true)) {
+            return false;
+        }
+
+        Time.sleep(300, 600, () -> ctx.menu().isOpen(), 50);
+        if (!ctx.menu().isOpen()) {
+            return false;
+        }
+
+        boolean selected = ctx.menu().interact("Buy-50", ALDARIUM, true)
+                || ctx.menu().interact("Buy-50", ALDARIUM, false)
+                || ctx.menu().interact("Buy-50", true)
+                || ctx.menu().interact("Buy-50", false);
+        if (!selected && ctx.menu().isOpen()) {
+            ctx.menu().closeMenu();
+        }
+        return selected;
     }
 
     private boolean depositClaimedAldariumInSocietyBank(APIContext ctx) {
@@ -945,14 +1115,49 @@ public class AldariumRewardService {
     }
 
     private WidgetChild findAldariumShopWidget(APIContext ctx) {
-        WidgetChild directAldarium = directAldariumWidget(ctx);
-        if (isVisibleWidget(directAldarium)) {
-            return directAldarium;
-        }
-
         WidgetChild storeItem = ctx.store().getItem(ALDARIUM);
         if (isVisibleAldariumWidget(storeItem)) {
             return storeItem;
+        }
+
+        WidgetChild itemIdWidget = findAldariumItemWidget(ctx);
+        if (itemIdWidget != null) {
+            return itemIdWidget;
+        }
+
+        WidgetChild directAldarium = directAldariumWidget(ctx);
+        if (isAldariumClickableInRewardList(ctx, directAldarium)) {
+            return directAldarium;
+        }
+
+        WidgetChild visibleFallback = null;
+        WidgetChild hiddenFallback = null;
+        for (WidgetChild widget : ctx.widgets().getAllChildren(candidate -> candidate != null
+                && candidate.isValid()
+                && widgetGroup(candidate) == REWARD_SHOP_GROUP)) {
+            if (!widgetMentionsAldarium(widget)) {
+                continue;
+            }
+            if (isAldariumClickableInRewardList(ctx, widget)) {
+                return widget;
+            }
+            if (widget.isVisible() && visibleFallback == null) {
+                visibleFallback = widget;
+            } else if (hiddenFallback == null) {
+                hiddenFallback = widget;
+            }
+        }
+
+        if (visibleFallback != null) {
+            return visibleFallback;
+        }
+
+        if (directAldarium != null && directAldarium.isValid()) {
+            return directAldarium;
+        }
+
+        if (hiddenFallback != null) {
+            return hiddenFallback;
         }
 
         WidgetChild fallback = null;
@@ -972,10 +1177,129 @@ public class AldariumRewardService {
             }
         }
 
-        return fallback != null ? fallback : directAldarium;
+        return fallback;
+    }
+
+    private WidgetChild findAldariumBuyFiftyActionWidget(APIContext ctx) {
+        WidgetChild aldarium = findAldariumShopWidget(ctx);
+        if (aldarium == null || !aldarium.isValid()) {
+            return findLastVisibleBuyFiftyRewardAtListBottom(ctx);
+        }
+
+        WidgetChild current = aldarium;
+        for (int depth = 0; depth < 6 && current != null && current.isValid(); depth++) {
+            if (widgetHasAction(current, "Buy-50")
+                    && isWidgetInsideRewardList(ctx, current)) {
+                return current;
+            }
+            current = current.getParent();
+        }
+
+        WidgetChild descendant = aldarium.find(widget -> widget != null
+                && widget.isValid()
+                && widgetHasAction(widget, "Buy-50")
+                && isWidgetInsideRewardList(ctx, widget));
+        if (descendant != null) {
+            return descendant;
+        }
+
+        Rectangle aldariumBounds = safeBounds(aldarium);
+        if (aldariumBounds == null) {
+            return null;
+        }
+        Point aldariumCenter = new Point(
+                aldariumBounds.x + aldariumBounds.width / 2,
+                aldariumBounds.y + aldariumBounds.height / 2);
+        WidgetChild overlappingAction = ctx.widgets().getAllChildren(widget -> widget != null
+                        && widget.isValid()
+                        && widgetHasAction(widget, "Buy-50")
+                        && widgetGroup(widget) == REWARD_SHOP_GROUP
+                        && isWidgetInsideRewardList(ctx, widget))
+                .stream()
+                .filter(widget -> {
+                    Rectangle bounds = safeBounds(widget);
+                    return bounds != null && (bounds.contains(aldariumCenter)
+                            || bounds.intersects(aldariumBounds));
+                })
+                .findFirst()
+                .orElse(null);
+        return overlappingAction != null
+                ? overlappingAction
+                : findLastVisibleBuyFiftyRewardAtListBottom(ctx);
+    }
+
+    private WidgetChild findLastVisibleBuyFiftyRewardAtListBottom(APIContext ctx) {
+        if (!isRewardListAtBottom(ctx)) {
+            return null;
+        }
+
+        return ctx.widgets().getAllChildren(widget -> widget != null
+                        && widget.isValid()
+                        && widget.isVisible()
+                        && widgetGroup(widget) == REWARD_SHOP_GROUP
+                        && widgetHasAction(widget, "Buy-50")
+                        && isWidgetInsideRewardList(ctx, widget))
+                .stream()
+                .max(Comparator
+                        .comparingInt(WidgetChild::getAbsoluteY)
+                        .thenComparingInt(WidgetChild::getAbsoluteX))
+                .orElse(null);
+    }
+
+    private boolean isRewardListAtBottom(APIContext ctx) {
+        WidgetChild rewardList = ctx.widgets().get(REWARD_SHOP_GROUP, REWARD_LIST_CHILD);
+        Rectangle viewport = rewardListViewportBounds(ctx);
+        if (rewardList == null || !rewardList.isValid() || viewport == null) {
+            return rewardListNoProgressAttempts > 0;
+        }
+
+        int scrollHeight = rewardList.getScrollHeight();
+        if (scrollHeight <= 0) {
+            return rewardListNoProgressAttempts > 0;
+        }
+        int maximumScroll = Math.max(0, scrollHeight - viewport.height);
+        return maximumScroll == 0
+                || rewardList.getScrollY() >= maximumScroll - 4
+                || rewardListNoProgressAttempts > 0;
+    }
+
+    private boolean isWidgetInsideRewardList(APIContext ctx, WidgetChild widget) {
+        Rectangle bounds = safeBounds(widget);
+        Rectangle viewport = rewardListViewportBounds(ctx);
+        return widget != null
+                && widget.isVisible()
+                && bounds != null
+                && viewport != null
+                && !bounds.intersection(viewport).isEmpty();
+    }
+
+    private WidgetChild findAldariumItemWidget(APIContext ctx) {
+        WidgetChild visibleFallback = null;
+        WidgetChild hiddenFallback = null;
+        for (WidgetChild widget : ctx.widgets().getAllChildren(candidate -> candidate != null
+                && candidate.isValid()
+                && widgetGroup(candidate) == REWARD_SHOP_GROUP)) {
+            if (safeItemId(widget) != ItemID.ALDARIUM) {
+                continue;
+            }
+            if (isAldariumClickableInRewardList(ctx, widget)) {
+                return widget;
+            }
+            if (widget.isVisible() && visibleFallback == null) {
+                visibleFallback = widget;
+            } else if (hiddenFallback == null) {
+                hiddenFallback = widget;
+            }
+        }
+        return visibleFallback != null ? visibleFallback : hiddenFallback;
     }
 
     private WidgetChild directAldariumWidget(APIContext ctx) {
+        WidgetChild directChild = ctx.widgets().get(REWARD_SHOP_GROUP, ALDARIUM_LIST_WIDGET_CHILD);
+        if (directChild != null && directChild.isValid()) {
+            return directChild;
+        }
+
         WidgetChild rewardList = ctx.widgets().get(REWARD_SHOP_GROUP, REWARD_LIST_CHILD);
         if (rewardList != null && rewardList.isValid()) {
             WidgetChild nested = rewardList.getChild(ALDARIUM_LIST_WIDGET_CHILD);
@@ -984,15 +1308,10 @@ public class AldariumRewardService {
             }
         }
 
-        WidgetChild directChild = ctx.widgets().get(REWARD_SHOP_GROUP, ALDARIUM_LIST_WIDGET_CHILD);
-        if (directChild != null && directChild.isValid()) {
-            return directChild;
-        }
-
         return ctx.widgets().getAllChildren(widget -> widget != null
                 && widget.isValid()
                 && widgetGroup(widget) == REWARD_SHOP_GROUP
-                && widget.getChildId() == ALDARIUM_LIST_WIDGET_CHILD)
+                && (widget.getChildId() & 0xFFFF) == ALDARIUM_LIST_WIDGET_CHILD)
                 .stream()
                 .findFirst()
                 .orElse(null);
@@ -1000,7 +1319,7 @@ public class AldariumRewardService {
 
     private boolean isVisibleAldariumWidget(WidgetChild widget) {
         return isVisibleWidget(widget)
-                && widgetMentionsAldarium(widget);
+                && (safeItemId(widget) == ItemID.ALDARIUM || widgetMentionsAldarium(widget));
     }
 
     private boolean isVisibleWidget(WidgetChild widget) {
@@ -1055,8 +1374,19 @@ public class AldariumRewardService {
         if (widget == null) {
             return false;
         }
+        if (safeItemId(widget) == ItemID.ALDARIUM) {
+            return true;
+        }
         String haystack = widgetTextAndName(widget).toLowerCase(Locale.ROOT);
         return haystack.contains("aldarium");
+    }
+
+    private int safeItemId(WidgetChild widget) {
+        try {
+            return widget == null || !widget.isValid() ? -1 : widget.getItemId();
+        } catch (RuntimeException ignored) {
+            return -1;
+        }
     }
 
     private String widgetTextAndName(WidgetChild widget) {
@@ -1520,6 +1850,7 @@ public class AldariumRewardService {
                 + " rightText='" + rightRewardPanelText(ctx) + "'"
                 + " rightAldarium=" + widgetSummary(rightAldarium)
                 + " buy50=" + widgetSummary(buyFifty)
+                + " selectedVarp=" + safeVarp(ctx, VarPlayerID.OMNISHOP_SELECTED_ID)
                 + " selectionAttempted=" + aldariumSelectionAttempted
                 + " selectedForClaim=" + aldariumSelectedForClaim);
     }
@@ -1530,6 +1861,7 @@ public class AldariumRewardService {
         }
         return "child=" + widget.getChildId()
                 + ", parent=" + widget.getParentId()
+                + ", itemId=" + safeItemId(widget)
                 + ", loc=" + widget.getAbsoluteX() + "," + widget.getAbsoluteY()
                 + ", size=" + widget.getWidth() + "x" + widget.getHeight()
                 + ", text='" + widgetText(widget) + "'"

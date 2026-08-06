@@ -62,6 +62,13 @@ public class SupervisorLaloService {
             return true;
         }
 
+        if (ctx.bank().isOpen()) {
+            stats.setStatus("Closing bank before Supervisor Lalo authorisation");
+            ctx.bank().close();
+            Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
+            return false;
+        }
+
         if (handleDialogue(ctx)) {
             return false;
         }

@@ -875,6 +875,9 @@ public class MixologyStats {
 
         if (containsAny(normalized,
                 "read 3 complete mixology order",
+                "timing finalizer",
+                "finalizer station varbits",
+                "finalizer associated",
                 "delivering",
                 "depositing 3",
                 "conveyor accepted",

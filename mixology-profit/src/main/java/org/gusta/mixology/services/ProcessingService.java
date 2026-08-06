@@ -1,5 +1,6 @@
 package org.gusta.mixology.services;
 
+import com.epicbot.api.gameval.VarbitID;
 import com.epicbot.api.shared.APIContext;
 import com.epicbot.api.shared.model.Tile;
 import com.epicbot.api.shared.util.time.Time;
@@ -13,6 +14,8 @@ public class ProcessingService {
     private static final long ACTION_RETRY_TIMEOUT_MS = 10_000L;
     private static final long PROCESS_FINISH_FAST_TIMEOUT_MS = 14_000L;
     private static final long PROCESS_FINISH_EXTENDED_TIMEOUT_MS = 25_000L;
+    private static final long PROCESS_FINISH_VARBIT_TIMEOUT_MS = 40_000L;
+    private static final long INVENTORY_ONLY_CONFIRM_STABILITY_MS = 2_000L;
     private static final int RETORT_ID = 55389;
     private static final int ALEMBIC_ID = 55391;
     private static final int AGITATOR_ID = 55390;
@@ -50,6 +53,8 @@ public class ProcessingService {
 
         stats.setStatus(process.statusName() + ": " + order.recipe().displayName());
         int beforeReady = potionInventory.potionCount(ctx, order.recipe());
+        int beforeUnfinished = potionInventory.unfinishedPotionCount(ctx, order.recipe());
+        FinalizerVarbitSnapshot beforeVarbits = readFinalizerVarbits(ctx, process);
         long clickRequestedAt = System.currentTimeMillis();
         boolean interacted = retryWorkstation(ctx, process);
         if (!interacted) {
@@ -60,16 +65,21 @@ public class ProcessingService {
         stats.debug("Timing finalizer click accepted: recipe=" + order.recipe().displayName()
                 + " process=" + process.name()
                 + " clickRetry=" + (actionStartedAt - clickRequestedAt) + "ms"
-                + " beforeReady=" + beforeReady);
+                + " beforeReady=" + beforeReady
+                + " beforeUnfinished=" + beforeUnfinished
+                + " varbits=" + beforeVarbits.text());
 
-        return waitForFinalizerCompletion(ctx, order, actionStartedAt, beforeReady);
+        return waitForFinalizerCompletion(
+                ctx, order, actionStartedAt, beforeReady, beforeUnfinished, beforeVarbits);
     }
 
     private boolean waitForFinalizerCompletion(
             APIContext ctx,
             PotionOrder order,
             long actionStartedAt,
-            int beforeReady
+            int beforeReady,
+            int beforeUnfinished,
+            FinalizerVarbitSnapshot beforeVarbits
     ) {
         PotionRecipe recipe = order.recipe();
         String recipeName = recipe == null ? "potion" : recipe.displayName();
@@ -87,11 +97,40 @@ public class ProcessingService {
         boolean extendedWindow = false;
         boolean chatLatencyLogged = false;
         boolean inventoryLatencyLogged = false;
+        boolean varbitActivityObserved = false;
+        boolean varbitCompletionObserved = false;
+        FinalizerVarbitSnapshot lastVarbits = beforeVarbits;
+        long inventoryOnlyStableSince = -1L;
+        int stableReadyCount = -1;
+        int stableUnfinishedCount = -1;
         while (true) {
             int readyNow = potionInventory.potionCount(ctx, recipe);
+            int unfinishedNow = potionInventory.unfinishedPotionCount(ctx, recipe);
             boolean matchingChat = stats.hasPotionFinalizerFinishedSince(actionStartedAt, recipe, order.process());
             long elapsed = System.currentTimeMillis() - actionStartedAt;
+            FinalizerVarbitSnapshot currentVarbits = readFinalizerVarbits(ctx, order.process());
             observedFinalizerActivity |= ctx.localPlayer().isAnimating();
+
+            if (!currentVarbits.equals(lastVarbits)) {
+                if (!varbitActivityObserved && !currentVarbits.equals(beforeVarbits)) {
+                    stats.debug("Finalizer station varbits started: recipe=" + recipeName
+                            + " process=" + order.process().name()
+                            + " elapsed=" + elapsed + "ms"
+                            + " baseline=" + beforeVarbits.text()
+                            + " current=" + currentVarbits.text());
+                }
+                lastVarbits = currentVarbits;
+            }
+            if (!currentVarbits.equals(beforeVarbits)) {
+                varbitActivityObserved = true;
+                observedFinalizerActivity = true;
+            } else if (varbitActivityObserved && !varbitCompletionObserved) {
+                varbitCompletionObserved = true;
+                stats.debug("Finalizer station varbits returned to baseline: recipe=" + recipeName
+                        + " process=" + order.process().name()
+                        + " elapsed=" + elapsed + "ms"
+                        + " baseline=" + beforeVarbits.text());
+            }
 
             if (matchingChat && !chatLatencyLogged) {
                 long chatElapsed = Math.max(0L, stats.lastPotionFinalizerFinishedAt() - actionStartedAt);
@@ -116,14 +155,50 @@ public class ProcessingService {
                 return true;
             }
 
+            boolean inventoryConversionConfirmed = readyNow > beforeReady
+                    && beforeUnfinished > 0
+                    && unfinishedNow < beforeUnfinished;
+            if (inventoryConversionConfirmed) {
+                if (readyNow != stableReadyCount || unfinishedNow != stableUnfinishedCount) {
+                    stableReadyCount = readyNow;
+                    stableUnfinishedCount = unfinishedNow;
+                    inventoryOnlyStableSince = System.currentTimeMillis();
+                } else if (inventoryOnlyStableSince > 0L
+                        && System.currentTimeMillis() - inventoryOnlyStableSince
+                        >= INVENTORY_ONLY_CONFIRM_STABILITY_MS) {
+                    stats.debug("Finalizer associated from stable inventory conversion: "
+                            + recipeName
+                            + " process=" + order.process().name()
+                            + " ready=" + beforeReady + "->" + readyNow
+                            + " unfinished=" + beforeUnfinished + "->" + unfinishedNow
+                            + " stableFor=" + (System.currentTimeMillis() - inventoryOnlyStableSince) + "ms"
+                            + " varbitActivity=" + varbitActivityObserved
+                            + " varbitCompleted=" + varbitCompletionObserved
+                            + " varbits=" + currentVarbits.text()
+                            + " chat='" + stats.lastPotionFinalizerFinishedMessage() + "'");
+                    stats.recordPotionMixed();
+                    Time.sleep(350, 650);
+                    return true;
+                }
+            } else {
+                inventoryOnlyStableSince = -1L;
+                stableReadyCount = -1;
+                stableUnfinishedCount = -1;
+            }
+
             if (System.currentTimeMillis() >= deadline) {
                 if (!extendedWindow && observedFinalizerActivity) {
                     extendedWindow = true;
-                    deadline = actionStartedAt + PROCESS_FINISH_EXTENDED_TIMEOUT_MS;
+                    deadline = actionStartedAt + (varbitActivityObserved
+                            ? PROCESS_FINISH_VARBIT_TIMEOUT_MS
+                            : PROCESS_FINISH_EXTENDED_TIMEOUT_MS);
                     stats.debug("Timing finalizer extension: recipe=" + recipeName
                             + " waited=" + elapsed + "ms"
-                            + " reason=animation-observed"
-                            + " max=" + PROCESS_FINISH_EXTENDED_TIMEOUT_MS + "ms");
+                            + " reason=" + (varbitActivityObserved
+                            ? "station-varbit-activity"
+                            : "animation-observed")
+                            + " max=" + (deadline - actionStartedAt) + "ms"
+                            + " varbits=" + currentVarbits.text());
                     continue;
                 }
                 break;
@@ -147,13 +222,63 @@ public class ProcessingService {
             Time.sleep(450, 750);
         }
 
-        stats.setStatus("Finalized potion was not confirmed by id+chat for " + recipeName + "; retrying safely");
+        stats.setStatus((varbitActivityObserved
+                ? "Finalizer station changed, but potion conversion was not confirmed for "
+                : "Finalizer click produced no station varbit activity for ")
+                + recipeName + "; retrying safely");
         stats.debug("Last finalizer completion message='"
                 + stats.lastPotionFinalizerFinishedMessage()
                 + "' elapsed=" + (System.currentTimeMillis() - actionStartedAt) + "ms"
                 + " extended=" + extendedWindow
+                + " varbitActivity=" + varbitActivityObserved
+                + " varbitCompleted=" + varbitCompletionObserved
+                + " beforeVarbits=" + beforeVarbits.text()
+                + " lastVarbits=" + lastVarbits.text()
                 + " inventory=" + potionInventory.allPotionDetails(ctx));
         return false;
+    }
+
+    private FinalizerVarbitSnapshot readFinalizerVarbits(APIContext ctx, PotionProcess process) {
+        return new FinalizerVarbitSnapshot(
+                safeVarbit(ctx, progressVarbitId(process)),
+                safeVarbit(ctx, potionVarbitId(process)));
+    }
+
+    private int progressVarbitId(PotionProcess process) {
+        if (process == PotionProcess.CONCENTRATE) {
+            return VarbitID.MM_RETORT_PROGRESS;
+        }
+        if (process == PotionProcess.CRYSTALISE) {
+            return VarbitID.MM_ALEMBIC_PROGRESS;
+        }
+        if (process == PotionProcess.HOMOGENISE) {
+            return VarbitID.MM_AGITATOR_PROGRESS;
+        }
+        return -1;
+    }
+
+    private int potionVarbitId(PotionProcess process) {
+        if (process == PotionProcess.CONCENTRATE) {
+            return VarbitID.MM_LAB_RETORT_POTION;
+        }
+        if (process == PotionProcess.CRYSTALISE) {
+            return VarbitID.MM_LAB_ALEMBIC_POTION;
+        }
+        if (process == PotionProcess.HOMOGENISE) {
+            return VarbitID.MM_LAB_AGITATOR_POTION;
+        }
+        return -1;
+    }
+
+    private int safeVarbit(APIContext ctx, int varbitId) {
+        if (ctx == null || ctx.vars() == null || varbitId < 0) {
+            return -1;
+        }
+        try {
+            return ctx.vars().getVarbit(varbitId);
+        } catch (RuntimeException ignored) {
+            return -1;
+        }
     }
 
     private boolean retryWorkstation(APIContext ctx, PotionProcess process) {
@@ -198,5 +323,11 @@ public class ProcessingService {
         Time.sleep(450, 900,
                 () -> !ctx.localPlayer().isMoving() && !ctx.localPlayer().isAnimating(),
                 100);
+    }
+
+    private record FinalizerVarbitSnapshot(int progress, int potion) {
+        private String text() {
+            return "progress=" + progress + ",potion=" + potion;
+        }
     }
 }
