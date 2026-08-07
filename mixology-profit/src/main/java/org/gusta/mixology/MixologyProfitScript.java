@@ -41,8 +41,8 @@ import java.util.List;
 
 @ScriptManifest(name = "Mixology Profit", gameType = GameType.OS)
 public class MixologyProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.94";
-    private static final String SCRIPT_UPDATE_NOTE = "Close the bank before first-time Supervisor Lalo authorisation";
+    private static final String SCRIPT_VERSION = "v0.2.100";
+    private static final String SCRIPT_UPDATE_NOTE = "Submit GE guide-price herb fallback without reopening item search";
 
     private MixologyStats stats;
     private MixologyPaint paint;

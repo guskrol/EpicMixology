@@ -34,6 +34,10 @@ public class ProfitPlanner {
         return pricing.aldariumRealtimePrice(ctx, fallbackPrice("Aldarium"));
     }
 
+    public boolean isClientPricingInCooldown() {
+        return pricing.isClientPricingInCooldown();
+    }
+
     public Map<PasteType, Long> cheapestPasteCosts(APIContext ctx) {
         Map<PasteType, Long> costs = new EnumMap<>(PasteType.class);
         for (PasteType type : PasteType.values()) {
@@ -45,10 +49,36 @@ public class ProfitPlanner {
     }
 
     public Optional<PasteSourceQuote> cheapestSource(APIContext ctx, PasteType type) {
+        if (pricing.isClientPricingInCooldown()) {
+            return safeFallbackSource(type).map(source -> quote(ctx, source));
+        }
+
+        PasteSourceQuote cheapest = null;
+        for (HerbSource source : HerbSources.all()) {
+            if (source.pasteType() != type) {
+                continue;
+            }
+            PasteSourceQuote candidate = quote(ctx, source);
+            if (pricing.isClientPricingInCooldown()) {
+                return safeFallbackSource(type).map(fallback -> quote(ctx, fallback));
+            }
+            if (cheapest == null || candidate.costPerPaste() < cheapest.costPerPaste()) {
+                cheapest = candidate;
+            }
+        }
+        return Optional.ofNullable(cheapest);
+    }
+
+    private Optional<HerbSource> safeFallbackSource(PasteType type) {
+        String itemName = switch (type) {
+            case MOX -> "Tarromin";
+            case AGA -> "Dwarf weed";
+            case LYE -> "Avantoe";
+        };
         return HerbSources.all().stream()
                 .filter(source -> source.pasteType() == type)
-                .map(source -> quote(ctx, source))
-                .min(Comparator.comparingLong(PasteSourceQuote::costPerPaste));
+                .filter(source -> source.itemName().equals(itemName))
+                .findFirst();
     }
 
     private RewardProfit profitFor(APIContext ctx, RewardOption reward, Map<PasteType, Long> pasteCosts) {

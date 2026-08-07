@@ -17,6 +17,7 @@ public class GePricingService {
     private static final int ALDARIUM_ITEM_ID = 29993;
     private static final long WIKI_PRICE_CACHE_MILLIS = 5 * 60_000L;
     private static final long WIKI_PRICE_FAILURE_RETRY_MILLIS = 5 * 60_000L;
+    private static final long CLIENT_PRICE_FAILURE_RETRY_MILLIS = 5 * 60_000L;
     private static final String WIKI_LATEST_PRICE_URL =
             "https://prices.runescape.wiki/api/v1/osrs/latest?id=";
     private static final Pattern LOW_PRICE_PATTERN = Pattern.compile("\"low\"\\s*:\\s*(\\d+)");
@@ -25,6 +26,7 @@ public class GePricingService {
     private int cachedAldariumWikiPrice;
     private long cachedAldariumWikiPriceAt;
     private long nextWikiPriceAttemptAt;
+    private long nextClientPriceAttemptAt;
 
     public int quickBuyPrice(APIContext ctx, String itemName, long fallbackBasePrice) {
         ItemDetail detail = itemDetail(ctx, itemName);
@@ -46,6 +48,10 @@ public class GePricingService {
             return wikiPrice;
         }
         return quickSellPrice(ctx, "Aldarium", fallbackBasePrice);
+    }
+
+    public boolean isClientPricingInCooldown() {
+        return System.currentTimeMillis() < nextClientPriceAttemptAt;
     }
 
     private int cachedWikiLatestSellPrice(int itemId) {
@@ -138,9 +144,22 @@ public class GePricingService {
         if (ctx == null || itemName == null || itemName.isBlank()) {
             return null;
         }
+
+        long now = System.currentTimeMillis();
+        if (now < nextClientPriceAttemptAt) {
+            return null;
+        }
+
         try {
-            return ctx.pricing().get(itemName);
+            ItemDetail detail = ctx.pricing().get(itemName);
+            if (detail != null) {
+                nextClientPriceAttemptAt = 0L;
+                return detail;
+            }
+            nextClientPriceAttemptAt = now + CLIENT_PRICE_FAILURE_RETRY_MILLIS;
+            return null;
         } catch (RuntimeException ignored) {
+            nextClientPriceAttemptAt = now + CLIENT_PRICE_FAILURE_RETRY_MILLIS;
             return null;
         }
     }

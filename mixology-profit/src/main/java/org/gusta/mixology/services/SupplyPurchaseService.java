@@ -4,6 +4,7 @@ import com.epicbot.api.shared.APIContext;
 import com.epicbot.api.shared.entity.ItemWidget;
 import com.epicbot.api.shared.entity.WidgetChild;
 import com.epicbot.api.shared.methods.IEquipmentAPI;
+import com.epicbot.api.shared.methods.IGrandExchangeAPI;
 import com.epicbot.api.shared.model.Tile;
 import com.epicbot.api.shared.model.ge.GrandExchangeOffer;
 import com.epicbot.api.shared.model.ge.GrandExchangeSlot;
@@ -32,6 +33,12 @@ public class SupplyPurchaseService {
     private static final int GE_MAX_Y = 3505;
     private static final Tile GRAND_EXCHANGE_WALK_TILE = new Tile(3164, 3487, 0);
     private static final int GE_SLOT_BATCH_SIZE = 8;
+    private static final long BUY_REPRICE_DELAY_MILLIS = 10_000L;
+    private static final int MIN_BUY_REPRICE_PERCENT = 10;
+    private static final int MAX_BUY_REPRICE_PERCENT = 25;
+    private static final int MAX_BUY_REPRICE_ATTEMPTS = 1;
+    private static final int MAX_GE_GUIDE_PRICE_READ_ATTEMPTS = 3;
+    private static final long GE_GUIDE_SUBMIT_CONFIRM_MILLIS = 5_000L;
 
     private final MixologySettings settings;
     private final MixologyStats stats;
@@ -47,6 +54,8 @@ public class SupplyPurchaseService {
     private boolean longRestockMode;
     private PurchaseRequest activePurchase;
     private final List<PurchaseRequest> placedBatch = new ArrayList<>();
+    private PurchaseRequest pendingReprice;
+    private long nextRepriceCollectAt;
     private long nextBatchCollectAt;
     private long nextRingTeleportAttemptAt;
 
@@ -102,6 +111,8 @@ public class SupplyPurchaseService {
         targetPasteByType.clear();
         activePurchase = null;
         placedBatch.clear();
+        pendingReprice = null;
+        nextRepriceCollectAt = 0L;
         nextBatchCollectAt = 0L;
         if (hopperStock != null && hopperStock.isComplete()) {
             for (PasteType type : PasteType.values()) {
@@ -174,7 +185,14 @@ public class SupplyPurchaseService {
                 labels.add(type.label() + "=" + availablePaste + " available; skip");
                 continue;
             }
-            pendingPurchases.add(new PurchaseRequest(type, quote.source(), targetPaste, quantity, quote.unitBuyPrice()));
+            pendingPurchases.add(new PurchaseRequest(
+                    type,
+                    quote.source(),
+                    targetPaste,
+                    quantity,
+                    quote.unitBuyPrice(),
+                    profitPlanner.isClientPricingInCooldown()
+            ));
             labels.add(label);
         }
 
@@ -296,6 +314,14 @@ public class SupplyPurchaseService {
             return false;
         }
 
+        if (handlePendingRepriceCollection(ctx)) {
+            return false;
+        }
+
+        if (repriceTimedOutPurchase(ctx)) {
+            return false;
+        }
+
         if (shouldCollectBatch(ctx)) {
             collectCompletedBatch(ctx);
             return false;
@@ -320,6 +346,9 @@ public class SupplyPurchaseService {
         GrandExchangeSlot existingSlot = findActiveSlot(ctx, activePurchase);
         if (existingSlot != null) {
             if (!containsPlacedPurchase(activePurchase)) {
+                if (activePurchase.offerPlacedAt <= 0L) {
+                    activePurchase.offerPlacedAt = System.currentTimeMillis();
+                }
                 placedBatch.add(activePurchase);
             }
             pendingPurchases.removeIf(request ->
@@ -328,6 +357,10 @@ public class SupplyPurchaseService {
                     + activePurchase.source.itemName() + " slot=" + existingSlot.getIndex());
             activePurchase = null;
             nextBatchCollectAt = System.currentTimeMillis() + 2_500L;
+            return false;
+        }
+
+        if (resolveInitialGePrice(ctx, activePurchase)) {
             return false;
         }
 
@@ -346,12 +379,195 @@ public class SupplyPurchaseService {
             return false;
         }
 
+        activePurchase.offerPlacedAt = System.currentTimeMillis();
         placedBatch.add(activePurchase);
         stats.setStatus("GE batch offers placed " + placedBatch.size() + "/"
                 + GE_SLOT_BATCH_SIZE + ": " + activePurchase.source.itemName());
         activePurchase = null;
         nextBatchCollectAt = System.currentTimeMillis() + 2_500L;
         return false;
+    }
+
+    private boolean resolveInitialGePrice(APIContext ctx, PurchaseRequest request) {
+        if (!request.useGeGuidePrice || request.repriceAttempts > 0) {
+            return false;
+        }
+
+        IGrandExchangeAPI.GrandExchangeScreen screen = ctx.grandExchange().getCurrentScreen();
+        long now = System.currentTimeMillis();
+        if (request.offerSubmittedAt > 0L) {
+            if (now - request.offerSubmittedAt < GE_GUIDE_SUBMIT_CONFIRM_MILLIS) {
+                stats.setStatus("Waiting for GE guide-price offer confirmation: "
+                        + request.source.itemName());
+                Time.sleep(600, 900);
+                return true;
+            }
+            request.offerSubmittedAt = 0L;
+            if (screen == IGrandExchangeAPI.GrandExchangeScreen.OVERVIEW) {
+                request.guidePriceResolved = false;
+                request.quantityConfigured = false;
+            }
+            stats.setStatus("GE guide-price offer not confirmed; retrying current setup for "
+                    + request.source.itemName());
+        }
+
+        if (screen == IGrandExchangeAPI.GrandExchangeScreen.SETUP_BUY_OFFER) {
+            if (!request.guidePriceResolved) {
+                int displayedPrice = ctx.grandExchange().getOfferPrice();
+                if (displayedPrice > 0) {
+                    request.unitPrice = displayedPrice;
+                    request.guidePriceResolved = true;
+                    stats.setStatus("Using GE displayed price for " + request.source.itemName()
+                            + ": " + displayedPrice + " each");
+                } else {
+                    request.guidePriceReadAttempts++;
+                    if (request.guidePriceReadAttempts >= MAX_GE_GUIDE_PRICE_READ_ATTEMPTS) {
+                        boolean priceSet = ctx.grandExchange().setPrice(request.unitPrice);
+                        request.guidePriceResolved = priceSet
+                                || ctx.grandExchange().getOfferPrice() == request.unitPrice;
+                        stats.setStatus("GE displayed price unavailable for " + request.source.itemName()
+                                + "; applying planned fallback " + request.unitPrice);
+                    }
+                }
+                Time.sleep(500, 800);
+                return true;
+            }
+
+            if (!request.quantityConfigured) {
+                stats.setStatus("Setting GE quantity for " + request.source.itemName()
+                        + ": " + request.quantity);
+                boolean quantitySet = ctx.grandExchange().setQuantity(request.quantity);
+                Time.sleep(500, 900,
+                        () -> ctx.grandExchange().getOfferQuantity() == request.quantity,
+                        100);
+                request.quantityConfigured = quantitySet
+                        || ctx.grandExchange().getOfferQuantity() == request.quantity;
+                return true;
+            }
+
+            stats.setStatus("Confirming " + request.quantity + "x "
+                    + request.source.itemName() + " at GE displayed price " + request.unitPrice);
+            boolean submitted = ctx.grandExchange().confirmOffer();
+            request.offerSubmittedAt = System.currentTimeMillis();
+            stats.debug("GE guide-price confirm requested: item=" + request.source.itemName()
+                    + " result=" + submitted);
+            Time.sleep(800, 1300,
+                    () -> findActiveSlot(ctx, request) != null
+                            || ctx.grandExchange().getCurrentScreen()
+                            == IGrandExchangeAPI.GrandExchangeScreen.OVERVIEW,
+                    100);
+            return true;
+        }
+
+        if (screen == IGrandExchangeAPI.GrandExchangeScreen.ACTIVE_BUY_OFFER) {
+            stats.setStatus("Waiting for active GE herb offer slot: " + request.source.itemName());
+            Time.sleep(600, 900);
+            return true;
+        }
+
+        if (screen != IGrandExchangeAPI.GrandExchangeScreen.OVERVIEW) {
+            ctx.grandExchange().backToOverview();
+            Time.sleep(600, 900);
+            return true;
+        }
+
+        stats.setStatus("Reading GE displayed price for " + request.source.itemName());
+        boolean opened = ctx.grandExchange().newBuyOffer(request.source.itemName());
+        if (!opened) {
+            request.guidePriceReadAttempts++;
+            if (request.guidePriceReadAttempts >= MAX_GE_GUIDE_PRICE_READ_ATTEMPTS) {
+                request.guidePriceResolved = true;
+                stats.setStatus("Could not open GE guide price for " + request.source.itemName()
+                        + "; retaining planned fallback " + request.unitPrice);
+            }
+        }
+        Time.sleep(800, 1300,
+                () -> ctx.grandExchange().getCurrentScreen()
+                        == IGrandExchangeAPI.GrandExchangeScreen.SETUP_BUY_OFFER,
+                100);
+        return true;
+    }
+
+    private boolean repriceTimedOutPurchase(APIContext ctx) {
+        if (activePurchase != null) {
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        for (int index = 0; index < placedBatch.size(); index++) {
+            PurchaseRequest request = placedBatch.get(index);
+            if (request.repriceAttempts >= MAX_BUY_REPRICE_ATTEMPTS
+                    || request.offerPlacedAt <= 0L
+                    || now - request.offerPlacedAt < BUY_REPRICE_DELAY_MILLIS) {
+                continue;
+            }
+
+            GrandExchangeSlot slot = findActiveSlot(ctx, request);
+            if (slot == null || slot.isCompleted() || slot.canCollect() || slot.getOffer() == null) {
+                continue;
+            }
+
+            GrandExchangeOffer offer = slot.getOffer();
+            int remaining = offer.getRemaining();
+            if (remaining <= 0) {
+                continue;
+            }
+
+            int currentPrice = Math.max(request.unitPrice, offer.getPrice());
+            int increasePercent = ThreadLocalRandom.current().nextInt(
+                    MIN_BUY_REPRICE_PERCENT,
+                    MAX_BUY_REPRICE_PERCENT + 1);
+            int increasedPrice = (int) Math.min(Integer.MAX_VALUE,
+                    Math.max(1L, (long) Math.ceil(currentPrice * (100 + increasePercent) / 100.0D)));
+            stats.setStatus("GE herb offer slow; repricing remaining " + remaining + "x "
+                    + request.source.itemName() + " " + increasePercent + "% higher from "
+                    + currentPrice + " to " + increasedPrice);
+            if (!slot.abortOffer()) {
+                Time.sleep(600, 900);
+                return true;
+            }
+
+            placedBatch.remove(index);
+            pendingReprice = new PurchaseRequest(
+                    request.pasteType,
+                    request.source,
+                    request.targetPaste,
+                    remaining,
+                    increasedPrice,
+                    request.repriceAttempts + 1
+            );
+            nextRepriceCollectAt = System.currentTimeMillis() + 1_000L;
+            Time.sleep(900, 1400);
+            return true;
+        }
+        return false;
+    }
+
+    private boolean handlePendingRepriceCollection(APIContext ctx) {
+        if (pendingReprice == null) {
+            return false;
+        }
+        if (System.currentTimeMillis() < nextRepriceCollectAt) {
+            Time.sleep(500, 800);
+            return true;
+        }
+
+        stats.setStatus("Collecting aborted herb offer before higher relist: "
+                + pendingReprice.source.itemName());
+        try {
+            ctx.grandExchange().collectToBank();
+        } catch (RuntimeException ignored) {
+            // Collection can be retried until the aborted slot is cleared.
+        }
+        Time.sleep(900, 1400, () -> findActiveSlot(ctx, pendingReprice) == null, 100);
+        if (findActiveSlot(ctx, pendingReprice) != null) {
+            nextRepriceCollectAt = System.currentTimeMillis() + 1_500L;
+            return true;
+        }
+
+        activePurchase = pendingReprice;
+        pendingReprice = null;
+        nextRepriceCollectAt = 0L;
+        return true;
     }
 
     private boolean tryRingOfWealthTeleport(APIContext ctx) {
@@ -611,20 +827,54 @@ public class SupplyPurchaseService {
         private final HerbSource source;
         private final int targetPaste;
         private final int quantity;
-        private final int unitPrice;
+        private int unitPrice;
+        private final int repriceAttempts;
+        private final boolean useGeGuidePrice;
+        private long offerPlacedAt;
+        private boolean guidePriceResolved;
+        private int guidePriceReadAttempts;
+        private boolean quantityConfigured;
+        private long offerSubmittedAt;
 
         private PurchaseRequest(
                 PasteType pasteType,
                 HerbSource source,
                 int targetPaste,
                 int quantity,
-                int unitPrice
+                int unitPrice,
+                boolean useGeGuidePrice
+        ) {
+            this(pasteType, source, targetPaste, quantity, unitPrice, 0, useGeGuidePrice);
+        }
+
+        private PurchaseRequest(
+                PasteType pasteType,
+                HerbSource source,
+                int targetPaste,
+                int quantity,
+                int unitPrice,
+                int repriceAttempts
+        ) {
+            this(pasteType, source, targetPaste, quantity, unitPrice, repriceAttempts, false);
+        }
+
+        private PurchaseRequest(
+                PasteType pasteType,
+                HerbSource source,
+                int targetPaste,
+                int quantity,
+                int unitPrice,
+                int repriceAttempts,
+                boolean useGeGuidePrice
         ) {
             this.pasteType = pasteType;
             this.source = source;
             this.targetPaste = targetPaste;
             this.quantity = quantity;
             this.unitPrice = unitPrice;
+            this.repriceAttempts = repriceAttempts;
+            this.useGeGuidePrice = useGeGuidePrice;
+            this.guidePriceResolved = !useGeGuidePrice || repriceAttempts > 0;
         }
 
         private String label() {
