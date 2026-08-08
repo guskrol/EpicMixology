@@ -79,6 +79,7 @@ public class MixologyRunner implements ScriptModule {
     private int startupLocationStableCycles;
     private MixologyState stateAfterAldariumReward = MixologyState.RETURN_TO_LEVERS;
     private boolean aldariumSaleCheckedBeforeSupplies;
+    private boolean startupPotionCleanupPending;
 
     public MixologyRunner(
             MixologySettings settings,
@@ -317,6 +318,7 @@ public class MixologyRunner implements ScriptModule {
         }
 
         if (travel.isInMixologyContext(ctx)) {
+            startupPotionCleanupPending = potionInventory.anyPotionCount(ctx) > 0;
             stats.setStatus("Started inside Mixology lab; skipping GE/travel setup");
             state = MixologyState.PREPARE_SUPPLIES;
             return;
@@ -466,6 +468,29 @@ public class MixologyRunner implements ScriptModule {
         }
 
         int carriedPotions = potionInventory.anyPotionCount(ctx);
+        if (startupPotionCleanupPending) {
+            if (carriedPotions <= 0) {
+                startupPotionCleanupPending = false;
+                orderCycle.resetTrackedBatch("startup carried potion cleanup completed");
+                bulkStockingComplete = false;
+                stats.setStatus("Startup potions cleared; preparing herbs, paste and Hopper");
+                return;
+            }
+            if (ctx.bank().isOpen()) {
+                stats.setStatus("Closing bank before startup conveyor cleanup");
+                ctx.bank().close();
+                Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
+                return;
+            }
+            if (orderCycle.depositCarriedPotionsAtStartup(ctx)) {
+                startupPotionCleanupPending = false;
+                currentOrders = new ArrayList<>();
+                orderCycle.resetTrackedBatch("startup carried potions deposited on conveyor");
+                bulkStockingComplete = false;
+                stats.setStatus("Startup potions deposited; preparing herbs, paste and Hopper");
+            }
+            return;
+        }
         if (cleanupCarriedPotionsBeforeRestock && carriedPotions > 0) {
             cleanCarriedPotionsBeforeRestock(ctx, carriedPotions);
             return;

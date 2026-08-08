@@ -196,6 +196,36 @@ public class ConveyorService {
         return delivered;
     }
 
+    public boolean depositCarriedPotionsAtStartup(APIContext ctx) {
+        int beforePotions = potionInventory.anyPotionCount(ctx);
+        if (beforePotions <= 0) {
+            return true;
+        }
+
+        stats.setStatus("Startup cleanup: depositing " + beforePotions
+                + " carried Mixology potion(s) on conveyor");
+        if (!retryDeposit(ctx, 1, 1)) {
+            return false;
+        }
+
+        Time.sleep(1200, 2200,
+                () -> potionInventory.anyPotionCount(ctx) < beforePotions,
+                100);
+        int remainingPotions = potionInventory.anyPotionCount(ctx);
+        if (remainingPotions >= beforePotions) {
+            stats.setStatus("Startup conveyor deposit was not confirmed; retrying safely");
+            stats.debug("Startup conveyor cleanup kept potion count at "
+                    + beforePotions + "; inventory=" + potionInventory.allPotionDetails(ctx));
+            return false;
+        }
+
+        stats.debug("Startup conveyor cleanup accepted="
+                + (beforePotions - remainingPotions)
+                + " remaining=" + remainingPotions
+                + " inventory=" + potionInventory.allPotionDetails(ctx));
+        return remainingPotions <= 0;
+    }
+
     private boolean retryDeposit(APIContext ctx, int expectedOrders, int fallbackReadyRequired) {
         long deadline = System.currentTimeMillis() + ACTION_RETRY_TIMEOUT_MS;
         while (System.currentTimeMillis() < deadline) {

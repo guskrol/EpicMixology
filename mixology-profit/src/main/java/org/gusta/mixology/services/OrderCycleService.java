@@ -41,6 +41,10 @@ public class OrderCycleService {
         this.potionInventory = potionInventory;
     }
 
+    public boolean depositCarriedPotionsAtStartup(APIContext ctx) {
+        return conveyor.depositCarriedPotionsAtStartup(ctx);
+    }
+
     public boolean executeCycle(APIContext ctx, List<PotionOrder> orders) {
         if (orders == null || orders.isEmpty()) {
             stats.setStatus("No orders ready to execute");

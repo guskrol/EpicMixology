@@ -34,6 +34,8 @@ public class SupplyPurchaseService {
     private static final Tile GRAND_EXCHANGE_WALK_TILE = new Tile(3164, 3487, 0);
     private static final int GE_SLOT_BATCH_SIZE = 8;
     private static final long BUY_REPRICE_DELAY_MILLIS = 10_000L;
+    private static final int MIN_INITIAL_BUY_MARKUP_PERCENT = 15;
+    private static final int MAX_INITIAL_BUY_MARKUP_PERCENT = 25;
     private static final int MIN_BUY_REPRICE_PERCENT = 10;
     private static final int MAX_BUY_REPRICE_PERCENT = 25;
     private static final int MAX_BUY_REPRICE_ATTEMPTS = 1;
@@ -364,6 +366,8 @@ public class SupplyPurchaseService {
             return false;
         }
 
+        applyInitialPurchaseMarkup(activePurchase);
+
         stats.setStatus("Buying " + activePurchase.quantity + "x "
                 + activePurchase.source.itemName() + " for " + activePurchase.unitPrice + " each");
         boolean placed = ctx.grandExchange().placeBuyOffer(
@@ -405,7 +409,10 @@ public class SupplyPurchaseService {
             request.offerSubmittedAt = 0L;
             if (screen == IGrandExchangeAPI.GrandExchangeScreen.OVERVIEW) {
                 request.guidePriceResolved = false;
+                request.offerPriceConfigured = false;
                 request.quantityConfigured = false;
+                request.initialMarkupApplied = false;
+                request.initialMarkupPercent = 0;
             }
             stats.setStatus("GE guide-price offer not confirmed; retrying current setup for "
                     + request.source.itemName());
@@ -422,14 +429,25 @@ public class SupplyPurchaseService {
                 } else {
                     request.guidePriceReadAttempts++;
                     if (request.guidePriceReadAttempts >= MAX_GE_GUIDE_PRICE_READ_ATTEMPTS) {
-                        boolean priceSet = ctx.grandExchange().setPrice(request.unitPrice);
-                        request.guidePriceResolved = priceSet
-                                || ctx.grandExchange().getOfferPrice() == request.unitPrice;
+                        request.guidePriceResolved = true;
                         stats.setStatus("GE displayed price unavailable for " + request.source.itemName()
                                 + "; applying planned fallback " + request.unitPrice);
                     }
                 }
                 Time.sleep(500, 800);
+                return true;
+            }
+
+            if (!request.offerPriceConfigured) {
+                applyInitialPurchaseMarkup(request);
+                stats.setStatus("Setting initial GE price for " + request.source.itemName()
+                        + ": " + request.unitPrice + " (" + request.initialMarkupPercent + "% higher)");
+                boolean priceSet = ctx.grandExchange().setPrice(request.unitPrice);
+                Time.sleep(500, 900,
+                        () -> ctx.grandExchange().getOfferPrice() == request.unitPrice,
+                        100);
+                request.offerPriceConfigured = priceSet
+                        || ctx.grandExchange().getOfferPrice() == request.unitPrice;
                 return true;
             }
 
@@ -486,6 +504,21 @@ public class SupplyPurchaseService {
                         == IGrandExchangeAPI.GrandExchangeScreen.SETUP_BUY_OFFER,
                 100);
         return true;
+    }
+
+    private void applyInitialPurchaseMarkup(PurchaseRequest request) {
+        if (request.initialMarkupApplied || request.repriceAttempts > 0) {
+            return;
+        }
+        int markupPercent = ThreadLocalRandom.current().nextInt(
+                MIN_INITIAL_BUY_MARKUP_PERCENT,
+                MAX_INITIAL_BUY_MARKUP_PERCENT + 1);
+        int basePrice = Math.max(1, request.unitPrice);
+        double divisor = request.useGeGuidePrice ? 100.0D : 115.0D;
+        request.unitPrice = (int) Math.min(Integer.MAX_VALUE,
+                Math.max(1L, (long) Math.ceil(basePrice * (100 + markupPercent) / divisor)));
+        request.initialMarkupPercent = markupPercent;
+        request.initialMarkupApplied = true;
     }
 
     private boolean repriceTimedOutPurchase(APIContext ctx) {
@@ -833,8 +866,11 @@ public class SupplyPurchaseService {
         private long offerPlacedAt;
         private boolean guidePriceResolved;
         private int guidePriceReadAttempts;
+        private boolean offerPriceConfigured;
         private boolean quantityConfigured;
         private long offerSubmittedAt;
+        private boolean initialMarkupApplied;
+        private int initialMarkupPercent;
 
         private PurchaseRequest(
                 PasteType pasteType,
